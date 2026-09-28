@@ -122,8 +122,11 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(cred["token"]["access_token"], "ya29.x", encoding)
 
     def test_garbage_blob_is_no_credential(self):
+        # Every reader must be stubbed: on Linux the real agy token file would
+        # otherwise leak into this assertion.
         with mock.patch.object(mod, "_windows_blob", return_value=b"\x01not json"), \
-                mock.patch.object(mod, "_macos_blob", return_value=None):
+                mock.patch.object(mod, "_macos_blob", return_value=None), \
+                mock.patch.object(mod, "_linux_blob", return_value=None):
             self.assertIsNone(mod._load_credential())
 
     def test_reader_crash_falls_through(self):
@@ -132,6 +135,27 @@ class CredentialTests(unittest.TestCase):
                 mock.patch.object(mod, "_macos_blob",
                                   return_value=json.dumps({"token": {}}).encode("utf-8")):
             self.assertEqual(mod._load_credential(), {"token": {}})
+
+    def test_linux_token_file_is_read(self):
+        # agy keeps the same dict in ~/.gemini/antigravity-cli on Linux.
+        blob = json.dumps({"token": {"access_token": "ya29.linux"}}).encode("utf-8")
+        with mock.patch.object(mod.sys, "platform", "linux"), \
+                mock.patch.object(mod, "_windows_blob", return_value=None), \
+                mock.patch.object(mod, "_macos_blob", return_value=None), \
+                mock.patch("builtins.open", mock.mock_open(read_data=blob)):
+            cred = mod._load_credential()
+        self.assertEqual(cred["token"]["access_token"], "ya29.linux")
+
+    def test_linux_reader_is_off_on_other_platforms(self):
+        with mock.patch.object(mod.sys, "platform", "darwin"):
+            self.assertIsNone(mod._linux_blob())
+
+    def test_unreadable_linux_file_is_no_credential(self):
+        with mock.patch.object(mod.sys, "platform", "linux"), \
+                mock.patch.object(mod, "_windows_blob", return_value=None), \
+                mock.patch.object(mod, "_macos_blob", return_value=None), \
+                mock.patch("builtins.open", side_effect=OSError("nope")):
+            self.assertIsNone(mod._load_credential())
 
 
 class TokenTests(unittest.TestCase):
@@ -153,6 +177,15 @@ class TokenTests(unittest.TestCase):
             self.assertEqual(
                 mod._access_token({"token": {"refresh_token": "1//r"}}),
                 (None, "auth-failed"))
+
+    def test_failed_refresh_keeps_a_usable_cached_token(self):
+        # The token endpoint can be briefly unreachable; that is not proof the
+        # credentials are dead. A dead one still ends as auth-failed on the 401.
+        with mock.patch.object(mod, "_refresh", return_value=None):
+            self.assertEqual(
+                mod._access_token({"token": {"refresh_token": "1//r",
+                                             "access_token": "ya29.cached"}}),
+                ("ya29.cached", None))
 
     def test_empty_credential_is_no_credentials(self):
         self.assertEqual(mod._access_token({"token": {}})[1], "no-credentials")
@@ -242,6 +275,12 @@ class ParseTests(unittest.TestCase):
         for payload in ({}, {"groups": "nope"}, {"groups": [{"buckets": "no"}]}):
             self.assertEqual(_windows_for(payload), [])
 
+    def test_non_object_payload_is_not_buckets(self):
+        # HTTP 200 carrying a JSON array or string is a schema surprise, not an
+        # AttributeError.
+        for payload in ([], ["groups"], "nope", None, 7):
+            self.assertEqual(mod._buckets(payload), {})
+
 
 class FetchTests(unittest.TestCase):
     def test_happy_path(self):
@@ -270,6 +309,10 @@ class FetchTests(unittest.TestCase):
 
     def test_no_usable_bucket_is_no_data(self):
         self.assertEqual(_fetch(summary={"groups": []}).unavailable_reason, "no-data")
+
+    def test_json_array_payload_is_no_data(self):
+        self.assertEqual(
+            _fetch_with_post(lambda p, t: ([], None)).unavailable_reason, "no-data")
 
     def test_plan_failure_does_not_lose_the_quota(self):
         def _post(path, token):  # noqa: ANN001, ARG001
@@ -300,13 +343,17 @@ class RegistrationTests(unittest.TestCase):
 
     def test_no_credential_write_back(self):
         # Reading someone else's login must never mutate their store, and this
-        # must never write to disk. ("open(" alone matches urlopen.)
+        # must never write to disk. Reading the Linux CLI token file is the one
+        # legitimate filesystem read, so the guard is write-freedom, not the
+        # absence of open().
         import re
 
         src = open(mod.__file__, encoding="utf-8").read()
         for forbidden in ("CredWrite", "CredDelete", "pathlib", "tempfile", "shutil"):
             self.assertNotIn(forbidden, src)
-        self.assertIsNone(re.search(r"(?<!url)(?<!urllib\.)\bopen\(", src))
+        for line in src.splitlines():
+            if re.search(r"(?<!url)(?<!urllib\.)\bopen\(", line):
+                self.assertRegex(line, r"[\"']r[b]?[\"']", f"non-read open(): {line.strip()}")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,8 @@ used rather than being dropped. Buckets are matched by ``bucketId``, never by
 array position.
 
 Credential: Windows Credential Manager ``gemini:antigravity`` (CredReadW), else
-macOS Keychain service ``gemini`` account ``antigravity``. Antigravity 2.0 moved
+macOS Keychain service ``gemini`` account ``antigravity``, else the Antigravity CLI
+token file ``~/.gemini/antigravity-cli/antigravity-oauth-token`` (Linux). Antigravity 2.0 moved
 its Google OAuth out of ``state.vscdb`` into the OS secret store, so that is the
 live source; the vscdb decoders keyed on the old ``oauthTokenInfoSentinelKey``
 return null on current builds and are deliberately not implemented. This is an
@@ -58,6 +59,9 @@ _USER_AGENT = "antigravity/2.8.0 windows/amd64"
 _TIMEOUT_S = 15.0
 
 _CRED_TARGET = "gemini:antigravity"
+
+# Linux: ``agy`` (Antigravity CLI) keeps the same token dict in an 0600 file.
+_LINUX_CRED_FILE = "~/.gemini/antigravity-cli/antigravity-oauth-token"
 
 # bucketId -> (window label, group)
 _BUCKETS = (
@@ -124,12 +128,29 @@ def _macos_blob() -> Optional[bytes]:
     return done.stdout.strip() or None if done.returncode == 0 else None
 
 
+def _linux_blob() -> Optional[bytes]:
+    """Reading the Antigravity login file written by ``agy``, or None.
+
+    The CLI stores the same dict as the Windows/macOS stores, one JSON object
+    with ``token``/``auth_method``/``id_token``. Read only; never written back.
+    """
+    if sys.platform != "linux":
+        return None
+    import os
+
+    try:
+        with open(os.path.expanduser(_LINUX_CRED_FILE), "rb") as fh:
+            return fh.read() or None
+    except OSError:
+        return None
+
+
 def _load_credential() -> Optional[dict[str, Any]]:
     """Antigravity's token dict, or None when not signed in.
 
     Readers are called defensively: a faulting one must not escape fail-open.
     """
-    for reader in (_windows_blob, _macos_blob):
+    for reader in (_windows_blob, _macos_blob, _linux_blob):
         try:
             blob = reader()
             if not blob:
@@ -170,17 +191,29 @@ def _refresh(refresh_token: str) -> Optional[str]:
 
 def _access_token(cred: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
     """(access_token, failure_reason). Refresh first; cached token is the fallback.
+
+    A failed refresh is not by itself proof the credentials are dead: the token
+    endpoint can be briefly unreachable. The stored access token may still be
+    valid, so it is tried before reporting ``auth-failed`` — a genuinely dead
+    credential then fails the quota call with 401, which is reported as
+    ``auth-failed`` anyway. Only a credential with neither a refresh token nor a
+    cached access token is ``no-credentials``.
     """
     token = cred.get("token")
     if not isinstance(token, dict):
         return None, "no-credentials"
+    cached = token.get("access_token")
+    cached = cached.strip() if isinstance(cached, str) and cached.strip() else None
     refresh = token.get("refresh_token")
     if isinstance(refresh, str) and refresh.strip():
         fresh = _refresh(refresh.strip())
-        return (fresh, None) if fresh else (None, "auth-failed")
-    cached = token.get("access_token")
-    if isinstance(cached, str) and cached.strip():
-        return cached.strip(), None
+        if fresh:
+            return fresh, None
+        if cached:
+            return cached, None
+        return None, "auth-failed"
+    if cached:
+        return cached, None
     return None, "no-credentials"
 
 
@@ -210,11 +243,15 @@ def _post(path: str, access_token: str) -> tuple[Optional[dict], Optional[int]]:
 # -- parsing -------------------------------------------------------------------
 
 
-def _buckets(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _buckets(payload: Any) -> dict[str, dict[str, Any]]:
     """First bucket per bucketId across all groups.
 
-    Tolerates the ``{"response": {...}}`` wrapper other clients observe.
+    Tolerates the ``{"response": {...}}`` wrapper other clients observe, and a
+    payload that is not an object at all: an HTTP 200 carrying a JSON array or
+    string is a schema surprise, which is no buckets rather than an exception.
     """
+    if not isinstance(payload, dict):
+        return {}
     if isinstance(payload.get("response"), dict):
         payload = payload["response"]
     found: dict[str, dict[str, Any]] = {}
