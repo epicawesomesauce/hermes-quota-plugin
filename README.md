@@ -131,6 +131,7 @@ Everything lives in the pane's **Quota Settings** view and persists locally:
 | `copilot` | local OAuth | Plan badge + windows |
 | `nous` | Nous Portal | Works on free accounts |
 | `gemini` | local CLI / OAuth | Detects the tier via `loadCodeAssist` |
+| `antigravity` | Antigravity OAuth: Windows Credential Manager, macOS Keychain, or the `agy` token file on Linux | Google AI Pro pools — Gemini and Claude/GPT each with a 5-hour and a weekly window; plan from `loadCodeAssist` (`paidTier` wins over `currentTier`) |
 | `kimi` | Hermes `kimi-coding` auth (dotenv/pool) or `~/kimi_session.json` | Session (5h), Monthly, and rate windows from `api.kimi.com/coding/v1/usages` |
 | `openrouter` | API key | Balance/credits style detail lines |
 | `opencode-go` | API key | See the OpenCode note below |
