@@ -53,7 +53,13 @@ const sdk = {
       return {}
     },
     navigate: () => {},
-    openExternal: () => {}
+    openExternal: () => {},
+    // Quota commands are routed to the focused profile's owner (#26). Without
+    // this state the pane throws on `focusedSessionOwner.get()` before it can
+    // render, so the harness must provide it.
+    state: {
+      focusedSessionOwner: { get: () => null, set: () => {}, subscribe: () => () => {} }
+    }
   },
   Input: props =>
     React.createElement('input', { value: (props || {}).value ?? '', readOnly: true }),
