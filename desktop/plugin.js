@@ -8,9 +8,9 @@
  *
  * Route /quota (full pane) + docked right pane + sidebar nav.
  *
- * Data path: host.request('cli.exec', {argv: ['quota', 'status', '--json']})
- *   → Hermes CLI → quota_cache.json (offline, fast).
- * Refresh: host.request('cli.exec', {argv: ['quota', 'refresh']}).
+ * Data path: host.requestProfile(route, 'cli.exec', {argv: ['quota', 'status', '--json']})
+ *   → focused profile's Hermes CLI → quota_cache.json (offline, fast).
+ * Refresh: host.requestProfile(route, 'cli.exec', {argv: ['quota', 'refresh']}).
  *
  * SINGLE SOURCE FILE: keep only at <hermes home>/desktop-plugins/quota/plugin.js.
  * Do NOT also place a copy under profiles/<name>/desktop-plugins/quota.
@@ -601,7 +601,23 @@ function UpdateBanner({ update }) {
 const QUOTA_QUERY_KEY = ["quota", "widget"];
 const SNAPSHOT_KEY = "lastPayload";
 const CLI_TIMEOUT_MS = 15_000;
-let _refreshInFlight = false;
+const _refreshInFlight = new Set();
+
+function normalizeQuotaScope(owner) {
+	const connectionId = String(owner?.connectionId || "").trim();
+	const profile = String(owner?.profile || "").trim();
+	return connectionId && profile ? { connectionId, profile } : null;
+}
+
+function quotaQueryKey(scope) {
+	return scope
+		? [...QUOTA_QUERY_KEY, scope.connectionId, scope.profile]
+		: [...QUOTA_QUERY_KEY, null, null];
+}
+
+function quotaSnapshotKey(scope) {
+	return `${SNAPSHOT_KEY}:${encodeURIComponent(scope.connectionId)}:${encodeURIComponent(scope.profile)}`;
+}
 
 // cli.exec currently joins stdout and stderr. Find a complete JSON value while
 // ignoring diagnostics, but only accept the shape needed by the caller. Each
@@ -709,9 +725,10 @@ function parseJsonOutput(output, requiredKey) {
 	throw firstError || new Error("invalid JSON output");
 }
 
-function readSnapshot() {
+function readSnapshot(scope) {
+	if (!scope) return undefined;
 	try {
-		const raw = CTX.storage.get(SNAPSHOT_KEY);
+		const raw = CTX.storage.get(quotaSnapshotKey(scope));
 		const parsed = raw ? JSON.parse(raw) : null;
 		return parsed && typeof parsed === "object" ? parsed : undefined;
 	} catch {
@@ -719,9 +736,9 @@ function readSnapshot() {
 	}
 }
 
-function writeSnapshot(data) {
+function writeSnapshot(scope, data) {
 	try {
-		CTX.storage.set(SNAPSHOT_KEY, JSON.stringify(data));
+		CTX.storage.set(quotaSnapshotKey(scope), JSON.stringify(data));
 	} catch {
 		/* storage unavailable — the poll still works, just no instant paint */
 	}
@@ -730,14 +747,48 @@ function writeSnapshot(data) {
 /** One CLI call that can never hang the UI: a gateway switch leaves the
  *  previous request sitting on a dead socket, and without a deadline the pane
  *  waits it out instead of failing over to the new gateway. */
-async function quotaCli(argv, timeoutMs = CLI_TIMEOUT_MS) {
+async function quotaCli(scope, argv, timeoutMs = CLI_TIMEOUT_MS, options) {
 	let timer = null;
+	let expired = false;
+	const deadline = Date.now() + timeoutMs;
 	try {
 		const result = await Promise.race([
-			host.request("cli.exec", { argv }),
+			(async () => {
+				if (!scope) throw new Error("focused quota profile unavailable");
+				const routes = await host.profileRoutes();
+				const matches = routes.filter(
+					(route) =>
+						route.connectionId === scope.connectionId &&
+						route.profile === scope.profile,
+				);
+				if (matches.length !== 1) {
+					throw new Error(
+						`quota profile route ${matches.length ? "ambiguous" : "unavailable"}`,
+					);
+				}
+				const remainingMs = deadline - Date.now();
+				if (expired || remainingMs <= 0) {
+					throw new Error("quota cli timeout");
+				}
+				const params = {
+					argv: ["--profile", matches[0].targetProfile, ...argv],
+				};
+				return options
+					? host.requestProfile(
+							matches[0],
+							"cli.exec",
+							params,
+							remainingMs,
+							options,
+						)
+					: host.requestProfile(matches[0], "cli.exec", params, remainingMs);
+			})(),
 			new Promise((_resolve, reject) => {
 				timer = setTimeout(
-					() => reject(new Error("quota cli timeout")),
+					() => {
+						expired = true;
+						reject(new Error("quota cli timeout"));
+					},
 					timeoutMs,
 				);
 			}),
@@ -752,27 +803,31 @@ async function quotaCli(argv, timeoutMs = CLI_TIMEOUT_MS) {
 }
 
 /** Out-of-band refresh: at most one in flight, never awaited by the UI. */
-async function refreshQuotaCache() {
-	if (_refreshInFlight) return false;
-	_refreshInFlight = true;
+async function refreshQuotaCache(scope) {
+	if (!scope) return false;
+	const key = JSON.stringify([scope.connectionId, scope.profile]);
+	if (_refreshInFlight.has(key)) return false;
+	_refreshInFlight.add(key);
 	try {
-		await quotaCli(["quota", "refresh"]);
+		await quotaCli(scope, ["quota", "refresh"]);
 		return true;
 	} catch {
 		return false;
 	} finally {
-		_refreshInFlight = false;
+		_refreshInFlight.delete(key);
 	}
 }
-
 function useQuota() {
 	const qc = useQueryClient();
 	const intervalSec = useValue(refreshIntervalAtom);
+	const owner = useValue(host.state.focusedSessionOwner);
+	const scope = normalizeQuotaScope(owner);
+	const queryKey = quotaQueryKey(scope);
 	const intervalMs = Math.max(5, intervalSec) * 1000;
 	return useQuery({
-		queryKey: QUOTA_QUERY_KEY,
+		queryKey,
 		queryFn: async () => {
-			const result = await quotaCli([
+			const result = await quotaCli(scope, [
 				"quota",
 				"status",
 				"--json",
@@ -787,7 +842,7 @@ function useQuota() {
 			} catch {
 				data = {};
 			}
-			writeSnapshot(data);
+			writeSnapshot(scope, data);
 			// Missing age (no cache yet on this gateway) counts as stale.
 			const rawAge = data ? data.age_s : null;
 			const stale =
@@ -796,13 +851,14 @@ function useQuota() {
 				Number(rawAge) > intervalSec;
 			// Fire the refresh off the poll path and update when it lands.
 			if (stale) {
-				void refreshQuotaCache().then((refreshed) => {
-					if (refreshed) qc.invalidateQueries({ queryKey: QUOTA_QUERY_KEY });
+				void refreshQuotaCache(scope).then((refreshed) => {
+					if (refreshed) qc.invalidateQueries({ queryKey });
 				});
 			}
 			return data;
 		},
-		placeholderData: readSnapshot(),
+		placeholderData: readSnapshot(scope),
+		enabled: Boolean(scope),
 		refetchInterval: intervalMs,
 		// The user asked for this cadence; honour it while the window is
 		// unfocused instead of silently pausing the poll.
@@ -1342,7 +1398,7 @@ function QuotaPane() {
 	const t = usePluginI18n(ID);
 	const qc = useQueryClient();
 	const [view, setView] = useState("list"); // 'list' | 'settings'
-	const { data, isError, isLoading, refetch } = useQuota();
+	const { data, isError, isLoading } = useQuota();
 	const update = useUpdateCheck(data && data.installed_sha);
 	// Footer honesty: the backend reports the cache age (authoritative across
 	// machines, no clock skew), the ticker keeps it live, and the configured
@@ -1370,16 +1426,14 @@ function QuotaPane() {
 			: null;
 	const refresh = useMutation({
 		mutationFn: async () => {
-			const result = await host.request("cli.exec", {
-				argv: ["quota", "refresh"],
+			const scope = normalizeQuotaScope(host.state.focusedSessionOwner.get());
+			await quotaCli(scope, ["quota", "refresh"], CLI_TIMEOUT_MS, {
+				spawnPriority: "foreground",
 			});
-			if (result?.blocked || result?.code !== 0) {
-				throw new Error(
-					result?.hint || result?.output || "quota refresh failed",
-				);
-			}
+			return scope;
 		},
-		onSuccess: () => qc.invalidateQueries({ queryKey: ["quota", "widget"] }),
+		onSuccess: (scope) =>
+			qc.invalidateQueries({ queryKey: quotaQueryKey(scope) }),
 	});
 
 	const headerTitle = view === "settings" ? t("settingsTitle") : t("paneTitle");
