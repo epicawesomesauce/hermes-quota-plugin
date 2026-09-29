@@ -92,6 +92,12 @@ without a stamp the check stays silent:
 { "installed_sha": "<commit>", "installed_at": "<ISO-8601 UTC>" }
 ```
 
+The stamp is not refreshed for you: an untracked `version.json` survives a catalog
+update (untracked files are carried into the replacement tree) and the `--ref`
+reinstall above, so it keeps describing the build it was written for. After any
+update, rewrite it — or delete it — with the commit now installed, otherwise the
+pane advertises an update the install already has.
+
 Either path updates the backend only. On a remote app the widget is a
 separate file on the app machine — update it too and reload desktop plugins.
 
