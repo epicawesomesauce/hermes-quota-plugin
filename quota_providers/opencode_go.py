@@ -55,7 +55,7 @@ import urllib.error
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _PROVIDER_ID = "opencode-go"
 _API_URL = "https://opencode.ai/zen/go/v1/usage"
@@ -373,7 +373,7 @@ def _attempt_usage(api_key: str) -> tuple[Optional[bytes], Optional[str], bool]:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as resp:
+        with urlopen_no_redirect(request, timeout=15) as resp:
             return resp.read(), None, False
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):

@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 from .registry import register as _register
 
 
@@ -176,7 +176,7 @@ def _anthropic_usage_payload() -> tuple[Optional[dict[str, Any]], Optional[str]]
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=_ANTHROPIC_TIMEOUT_S) as resp:
+        with urlopen_no_redirect(request, timeout=_ANTHROPIC_TIMEOUT_S) as resp:
             payload = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):

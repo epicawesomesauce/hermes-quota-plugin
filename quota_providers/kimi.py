@@ -33,7 +33,7 @@ import urllib.request
 import urllib.error
 from typing import Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _DEFAULT_BASE_URL = "https://api.kimi.com/coding"
 _WEB_URL = "https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages"
@@ -170,7 +170,7 @@ def _parse_usage_entry(key: str, entry: dict) -> Optional[QuotaWindow]:
 def _fetch_with(headers: dict, url: str, method: str = "GET", body: Optional[bytes] = None) -> Optional[QuotaResult]:
     req = urllib.request.Request(url, headers=headers, method=method, data=body)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):

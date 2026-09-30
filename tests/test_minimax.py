@@ -231,7 +231,8 @@ class MiniMaxFetchTests(unittest.TestCase):
         self.assertEqual(opener.call_count, 0)
 
     def test_redirects_are_never_followed(self):
-        handler = minimax._NoRedirect()
+        from quota_providers.base import NoRedirectHandler
+        handler = NoRedirectHandler()
         request = minimax.urllib.request.Request("https://www.minimax.io/v1/token_plan/remains")
         self.assertIsNone(handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example"))
 

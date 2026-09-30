@@ -9,7 +9,7 @@ import urllib.request
 import urllib.error
 from typing import Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 from .browser_cookies import (
     ChromeCookieError,
     load_chrome_grok_cookies,
@@ -219,7 +219,7 @@ def _fetch_grok_rest(cookies: str) -> Optional[QuotaResult]:
     }
     req = urllib.request.Request(_REST_RATELIMITS_URL, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
@@ -284,7 +284,7 @@ def fetch_grok_quota() -> QuotaResult:
     }
     req = urllib.request.Request(_GROK_ENDPOINT, data=_EMPTY_GRPCWEB_BODY, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):

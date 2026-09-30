@@ -47,7 +47,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _PROVIDER_ID = "copilot"
 _API_URL = "https://api.github.com/copilot_internal/user"
@@ -221,7 +221,7 @@ def fetch_usage(github_token: str) -> QuotaResult:
     headers["Authorization"] = f"token {github_token}"
     request = urllib.request.Request(_API_URL, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=15) as resp:
+        with urlopen_no_redirect(request, timeout=15) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):

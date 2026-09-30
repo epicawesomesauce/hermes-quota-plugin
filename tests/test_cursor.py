@@ -60,7 +60,7 @@ def _opener(routes):
 
 def _fetch(routes, token="tok"):
     with mock.patch.object(cursor, "resolve_access_token", return_value=token), \
-         mock.patch.object(cursor.urllib.request, "urlopen", _opener(routes)):
+         mock.patch.object(cursor, "urlopen_no_redirect", _opener(routes)):
         return cursor.fetch_cursor_quota()
 
 
@@ -166,7 +166,7 @@ class CursorFetcherTests(unittest.TestCase):
              mock.patch.object(cursor, "resolve_refresh_token",
                                return_value=("refresh-token", "auth-file")), \
              mock.patch.object(cursor, "_persist_refreshed_credentials") as persist, \
-             mock.patch.object(cursor.urllib.request, "urlopen", opener):
+             mock.patch.object(cursor, "urlopen_no_redirect", opener):
             res = cursor.fetch_cursor_quota()
 
         self.assertIsNone(res.unavailable_reason)

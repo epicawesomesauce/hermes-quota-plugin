@@ -42,7 +42,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 from .registry import register as _register
 
 _PROVIDER_ID = "antigravity"
@@ -177,7 +177,7 @@ def _refresh(refresh_token: str) -> Optional[str]:
         "grant_type": "refresh_token",
     }).encode("utf-8")
     try:
-        with urllib.request.urlopen(urllib.request.Request(
+        with urlopen_no_redirect(urllib.request.Request(
             _TOKEN_URL, data=body, method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded",
                      "User-Agent": _USER_AGENT},
@@ -226,7 +226,7 @@ def _post(path: str, access_token: str) -> tuple[Optional[dict], Optional[int]]:
     ``http_status`` is None on success and on a transport failure alike.
     """
     try:
-        with urllib.request.urlopen(urllib.request.Request(
+        with urlopen_no_redirect(urllib.request.Request(
             _BASE + path, data=b"{}", method="POST",
             headers={"Authorization": f"Bearer {access_token}",
                      "Content-Type": "application/json",

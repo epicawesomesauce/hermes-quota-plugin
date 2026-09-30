@@ -58,7 +58,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 PROVIDER_ID = "zai"
 _QUOTA_PATH = "/api/monitor/usage/quota/limit"
@@ -309,7 +309,7 @@ def _get_json(url: str, api_key: str) -> Any:
         },
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=15) as resp:
+    with urlopen_no_redirect(request, timeout=15) as resp:
         raw = resp.read()
     return json.loads(raw)
 

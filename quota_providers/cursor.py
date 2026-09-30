@@ -51,7 +51,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _PROVIDER_ID = "cursor"
 _API_ROOT = "https://api2.cursor.sh/aiserver.v1.DashboardService"
@@ -236,7 +236,7 @@ def _post(method: str, token: str) -> tuple[Optional[Any], Optional[str]]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_S) as resp:
+        with urlopen_no_redirect(request, timeout=_HTTP_TIMEOUT_S) as resp:
             body = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -264,7 +264,7 @@ def _refresh_access_token(refresh_token: str) -> tuple[Optional[str], Optional[s
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=_REFRESH_TIMEOUT_S) as resp:
+        with urlopen_no_redirect(request, timeout=_REFRESH_TIMEOUT_S) as resp:
             body = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):

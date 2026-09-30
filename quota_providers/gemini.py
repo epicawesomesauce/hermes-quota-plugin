@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 from typing import Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 _LOAD_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
@@ -74,7 +74,7 @@ def _refresh(creds: dict) -> Optional[str]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             d = json.loads(resp.read())
         return d.get("access_token")
     except Exception:
@@ -126,7 +126,7 @@ def _post_json(url: str, body: dict, token: str):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             return json.loads(resp.read()), None
     except urllib.error.HTTPError as e:
         try:

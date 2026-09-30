@@ -22,7 +22,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 from .registry import register as _register
 
 _PROVIDER = "commandcode"
@@ -91,7 +91,7 @@ def _get(path: str, key: str) -> Any:
             "User-Agent": _UA,
         },
     )
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+    with urlopen_no_redirect(req, timeout=_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 

@@ -73,7 +73,7 @@ _LIVE_SHAPE = {
 def _fetch_with_payload(payload, **resolver_overrides):
     resolvers = dict({"token": "gho_test"}, **resolver_overrides)
     with mock.patch.object(mod, "resolve_github_token", return_value=resolvers["token"]), \
-            mock.patch.object(mod.urllib.request, "urlopen", _urlopen_returning(payload)):
+            mock.patch.object(mod, "urlopen_no_redirect", _urlopen_returning(payload)):
         return mod.fetch_copilot_quota()
 
 
@@ -220,7 +220,7 @@ class NetworkTests(unittest.TestCase):
             raise urllib.error.HTTPError(mod._API_URL, 401, "Unauthorized", None, None)
 
         with mock.patch.object(mod, "resolve_github_token", return_value="gho_test"), \
-                mock.patch.object(mod.urllib.request, "urlopen", _opener):
+                mock.patch.object(mod, "urlopen_no_redirect", _opener):
             result = mod.fetch_copilot_quota()
         self.assertEqual(result.unavailable_reason, "auth-failed")
 
@@ -231,7 +231,7 @@ class NetworkTests(unittest.TestCase):
             raise urllib.error.HTTPError(mod._API_URL, 429, "Slow down", None, None)
 
         with mock.patch.object(mod, "resolve_github_token", return_value="gho_test"), \
-                mock.patch.object(mod.urllib.request, "urlopen", _opener):
+                mock.patch.object(mod, "urlopen_no_redirect", _opener):
             result = mod.fetch_copilot_quota()
         self.assertEqual(result.unavailable_reason, "http-429")
 
@@ -240,7 +240,7 @@ class NetworkTests(unittest.TestCase):
             return _FakeResponse(b"<html>not json</html>")
 
         with mock.patch.object(mod, "resolve_github_token", return_value="gho_test"), \
-                mock.patch.object(mod.urllib.request, "urlopen", _opener):
+                mock.patch.object(mod, "urlopen_no_redirect", _opener):
             result = mod.fetch_copilot_quota()
         self.assertEqual(result.unavailable_reason, "bad-json")
 

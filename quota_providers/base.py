@@ -2,8 +2,27 @@
 
 from __future__ import annotations
 
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so a bearer credential is never replayed to another host.
+
+    ``urllib``'s default ``HTTPRedirectHandler`` re-sends the ``Authorization``
+    and ``Cookie`` headers to the redirect target, so a 302 from a provider
+    endpoint would hand the credential to whichever host named in ``Location``.
+    Every authenticated provider request must go through :func:`urlopen_no_redirect`.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ARG002
+        return None
+
+
+#: Opener that never follows a redirect. Use instead of ``urllib.request.urlopen``
+#: for every request that carries a credential.
+urlopen_no_redirect = urllib.request.build_opener(NoRedirectHandler()).open
 
 
 @dataclass

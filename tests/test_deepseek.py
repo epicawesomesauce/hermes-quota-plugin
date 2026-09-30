@@ -120,7 +120,8 @@ class DeepSeekTests(unittest.TestCase):
             response.__enter__.return_value.read.return_value = body
             with mock.patch.object(api_keys, 'urlopen', return_value=response):
                 self.assertEqual(api_keys.get_json('https://api.deepseek.com/user/balance', 'SECRET'), (None, reason))
-        self.assertIsNone(api_keys._NoRedirect().redirect_request(None, None, 302, '', {}, 'https://elsewhere'))
+        from quota_providers.base import NoRedirectHandler
+        self.assertIsNone(NoRedirectHandler().redirect_request(None, None, 302, '', {}, 'https://elsewhere'))
 
     def test_decimal_validation(self):
         self.module()

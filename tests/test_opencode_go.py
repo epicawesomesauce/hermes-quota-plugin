@@ -132,16 +132,16 @@ class TransientFailureTests(unittest.TestCase):
                 raise urllib.error.URLError("connection reset")
             raise urllib.error.HTTPError(mod._API_URL, kind, "boom", hdrs=None, fp=None)
 
-        mod.urllib.request.urlopen = fake_urlopen
+        mod.urlopen_no_redirect = fake_urlopen
         return calls
 
     def _run(self, mod, outcomes, attempts=4):
-        original = mod.urllib.request.urlopen
+        original = mod.urlopen_no_redirect
         try:
             calls = self._patch_urlopen(mod, outcomes)
             result = mod.fetch_usage("sk-test", attempts=attempts, _sleep=lambda _s: None)
         finally:
-            mod.urllib.request.urlopen = original
+            mod.urlopen_no_redirect = original
         return result, calls["n"]
 
     def test_503_is_retried_until_success(self):
@@ -280,13 +280,13 @@ class FetcherContractTests(unittest.TestCase):
         def raise_401(*args, **kwargs):
             raise urllib.error.HTTPError(mod._API_URL, 401, "nope", hdrs=None, fp=None)  # type: ignore[arg-type]
 
-        original = mod.urllib.request.urlopen
+        original = mod.urlopen_no_redirect
         try:
-            mod.urllib.request.urlopen = raise_401
+            mod.urlopen_no_redirect = raise_401
             result = mod.fetch_usage("fake-key")
             self.assertEqual(result.unavailable_reason, "auth-failed")
         finally:
-            mod.urllib.request.urlopen = original
+            mod.urlopen_no_redirect = original
 
 
 def _safe_call(mod):

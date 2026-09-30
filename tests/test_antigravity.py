@@ -198,14 +198,14 @@ class TokenTests(unittest.TestCase):
             seen["body"] = req.data.decode("utf-8")
             return _FakeResponse(json.dumps({"access_token": "ya29.new"}).encode())
 
-        with mock.patch.object(mod.urllib.request, "urlopen", _opener):
+        with mock.patch.object(mod, "urlopen_no_redirect", _opener):
             self.assertEqual(mod._refresh("1//r"), "ya29.new")
         self.assertIn("grant_type=refresh_token", seen["body"])
         self.assertIn("1071006060591", seen["body"])
 
     def test_refresh_http_error_returns_none(self):
         with mock.patch.object(
-                mod.urllib.request, "urlopen", _urlopen_raising(_http_error(401))):
+                mod, "urlopen_no_redirect", _urlopen_raising(_http_error(401))):
             self.assertIsNone(mod._refresh("1//r"))
 
 

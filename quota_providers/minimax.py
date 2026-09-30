@@ -73,7 +73,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 from .registry import register
 
 PROVIDER_ID = "minimax"
@@ -319,14 +319,8 @@ class _ResponseTooLarge(Exception):
     """The endpoint answered with more than the plugin is willing to read."""
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Never forward a bearer credential to a redirected host."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ARG002
-        return None
-
-
-_urlopen = urllib.request.build_opener(_NoRedirect()).open
+# Never forward a bearer credential to a redirected host (see base.NoRedirectHandler).
+_urlopen = urlopen_no_redirect
 
 
 def _get_json(url: str, bearer: str, timeout: float) -> Any:
