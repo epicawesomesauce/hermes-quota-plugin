@@ -263,6 +263,34 @@ class ZaiSubscriptionTests(unittest.TestCase):
             with self.subTest(item=item):
                 self.assertEqual(self.mod._subscription_plan({"data": [item]}), (None, None))
 
+    def test_valid_true_does_not_override_a_canceled_status(self):
+        """`valid: true` next to a dead status must not surface as active.
+
+        Satisfying EITHER signal was enough, so a canceled plan paired with
+        valid:true came back as the active subscription with its renewal date.
+        Both must be good. An absent status is not a veto -- live responses
+        often omit it.
+        """
+        for status in ("CANCELED", "CANCELLED", "EXPIRED", "SUSPENDED", "INACTIVE"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    self.mod._subscription_plan({"data": [{
+                        "productName": "Canceled Pro", "valid": True,
+                        "status": status, "renewTime": "2026-01-01T00:00:00Z",
+                    }]}),
+                    (None, None))
+        # Control: genuinely live, with and without a status field.
+        self.assertEqual(
+            self.mod._subscription_plan({"data": [{
+                "productName": "Real Pro", "valid": True, "status": "ACTIVE",
+            }]}),
+            ("Real Pro", None))
+        self.assertEqual(
+            self.mod._subscription_plan({"data": [{
+                "productName": "Real Pro", "valid": True,
+            }]}),
+            ("Real Pro", None))
+
     def test_a_canceled_item_does_not_shadow_a_live_one(self):
         self.assertEqual(
             self.mod._subscription_plan({"data": [

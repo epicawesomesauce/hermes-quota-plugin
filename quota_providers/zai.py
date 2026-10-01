@@ -289,7 +289,15 @@ def _subscription_plan(payload: Any) -> tuple[Optional[str], Optional[str]]:
         # A subscription item must positively assert it is live. Previously an
         # item carrying neither `valid` nor `status` passed the filter, so a
         # bare {"productName": "Canceled Plan"} was returned as the active plan.
+        #
+        # Both signals are required to be good, not merely one: `valid: true`
+        # alongside a canceled/expired status would otherwise surface a dead
+        # plan as the active subscription with its renewal date. An unknown
+        # status (empty) is not treated as a veto -- plenty of live responses
+        # carry no status field -- but a stated non-active one is.
         if valid is not True and status not in ("ACTIVE", "NORMAL", "OK"):
+            continue
+        if status and status not in ("ACTIVE", "NORMAL", "OK"):
             continue
         name = str(item.get("productName") or item.get("name") or "").strip()
         renew = _parse_reset(item.get("renewTime") or item.get("expireTime"))
