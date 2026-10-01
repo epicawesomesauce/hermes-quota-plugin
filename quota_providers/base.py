@@ -95,7 +95,7 @@ def opt_in_flag(value: object) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value != 0
+        return value == 1
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False

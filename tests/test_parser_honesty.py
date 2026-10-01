@@ -139,8 +139,8 @@ class AnthropicUtilizationTests(unittest.TestCase):
         self.assertEqual(self._used(150), 100.0)
 
 
-class CodexWindowClampTests(unittest.TestCase):
-    """builtin._window wrote used_percent unclamped, so 150.0 reached the cache."""
+class CodexWindowRangeTests(unittest.TestCase):
+    """An out-of-range reported percent is not an honest quota value."""
 
     def _fetch(self, used_percent):
         mod = load("builtin")
@@ -186,10 +186,12 @@ class CodexWindowClampTests(unittest.TestCase):
         }):
             return mod._fetch_codex_with_models()
 
-    def test_out_of_range_percent_is_clamped_like_its_siblings(self):
-        result = self._fetch(150)
-        self.assertIsNone(result.unavailable_reason)
-        self.assertEqual([w.used_percent for w in result.windows], [100.0])
+    def test_out_of_range_or_nonfinite_percent_is_dropped(self):
+        for value in (150, -5, float("inf"), float("-inf"), float("nan")):
+            with self.subTest(value=value):
+                result = self._fetch(value)
+                self.assertEqual(result.unavailable_reason, "no-data")
+                self.assertEqual(result.windows, [])
 
     def test_in_range_percent_is_untouched(self):
         result = self._fetch(42)
@@ -342,10 +344,14 @@ class OptInFlagTests(unittest.TestCase):
         self.assertFalse(self.base.opt_in_flag(False))
 
     def test_affirmative_strings_and_numbers(self):
-        for value in ("true", "yes", "on", "1", 1, 1.0):
+        for value in ("true", "yes", "on", "1"):
             with self.subTest(value=value):
                 self.assertTrue(self.base.opt_in_flag(value))
-        for value in ("", None, [], {}, "maybe", 0):
+        for value in (1, 1.0):
+            with self.subTest(value=value):
+                self.assertTrue(self.base.opt_in_flag(value))
+        for value in ("", None, [], {}, "maybe", 0, -1, 2, 0.5,
+                      float("inf"), float("-inf"), float("nan")):
             with self.subTest(value=value):
                 self.assertFalse(self.base.opt_in_flag(value))
 

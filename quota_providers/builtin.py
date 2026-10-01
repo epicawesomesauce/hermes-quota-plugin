@@ -496,11 +496,15 @@ def _fetch_codex_with_models() -> QuotaResult:
         used = raw.get("used_percent")
         if not isinstance(used, (int, float)) or isinstance(used, bool):
             return None
+        try:
+            used_percent = float(used)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not math.isfinite(used_percent) or not 0.0 <= used_percent <= 100.0:
+            return None
         return QuotaWindow(
             label=label,
-            # Clamp like every other parser in this package (see :154 and :223):
-            # an out-of-range value is a schema surprise, not a percentage.
-            used_percent=max(0.0, min(100.0, float(used))),
+            used_percent=used_percent,
             reset_at=_iso(raw.get("reset_at")),
         )
 

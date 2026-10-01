@@ -20,7 +20,7 @@ from quota_providers import PROVIDER_FETCHERS  # noqa: E402
 
 
 class GeminiAuthVsTierTests(unittest.TestCase):
-    """A 401/403 was reported as consumer-tier-deprecated.
+    """Only recognized auth/tier evidence should specialize an HTTP reason.
 
     The maintainer's own words on #25, about this exact failure mode in
     antigravity: "this is the one failure mode that looks like a product
@@ -42,11 +42,18 @@ class GeminiAuthVsTierTests(unittest.TestCase):
                 _post_json=lambda *a: (None, {"code": code, "body": body})):
             return PROVIDER_FETCHERS["gemini"]().unavailable_reason
 
-    def test_expired_token_reports_auth_failed(self):
-        for code in (401, 403):
-            for body in ('{"error":"invalid_token"}', '{"error":"unauthorized"}', ""):
-                with self.subTest(code=code, body=body):
-                    self.assertEqual(self._reason_for(code, body), "auth-failed")
+    def test_recognized_auth_response_reports_auth_failed(self):
+        for body in ('{"error":"invalid_token"}', '{"error":"unauthorized"}', ""):
+            with self.subTest(code=401, body=body):
+                self.assertEqual(self._reason_for(401, body), "auth-failed")
+        for body in ('{"error":"invalid_token"}', '{"error":"unauthorized"}'):
+            with self.subTest(code=403, body=body):
+                self.assertEqual(self._reason_for(403, body), "auth-failed")
+
+    def test_unrecognized_403_reports_http_status(self):
+        for body in ("", "{}", '{"error":"PERMISSION_DENIED"}'):
+            with self.subTest(body=body):
+                self.assertEqual(self._reason_for(403, body), "http-403")
 
     def test_a_genuine_tier_verdict_still_reports_the_tier(self):
         """The real free-tier case must keep its honest card."""
@@ -93,6 +100,12 @@ class DeepSeekCredentialReasonTests(unittest.TestCase):
                                side_effect=RuntimeError("keyring locked")):
             result = self.mod.fetch_deepseek_quota()
         self.assertEqual(result.unavailable_reason, "no-credentials")
+
+    def test_unexpected_resolver_error_reports_fetch_error(self):
+        with mock.patch.object(self.mod, "resolve_api_key",
+                               side_effect=ValueError("resolver failed")):
+            result = self.mod.fetch_deepseek_quota()
+        self.assertEqual(result.unavailable_reason, "fetch-error")
 
     def test_no_key_still_reports_no_credentials(self):
         with mock.patch.object(self.mod, "resolve_api_key", return_value=None):

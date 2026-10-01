@@ -18,8 +18,10 @@ def fetch_deepseek_quota() -> QuotaResult:
     # standalone install can never fix a missing core by retrying.
     try:
         secret = resolve_api_key("deepseek")
-    except Exception:  # noqa: BLE001 - a standalone install has no hermes_cli
+    except (ImportError, RuntimeError):  # noqa: BLE001 - missing core / locked credential store
         return build_unavailable("deepseek", "no-credentials")
+    except Exception:  # noqa: BLE001 - unexpected resolver failure
+        return build_unavailable("deepseek", "fetch-error")
     if not secret:
         return build_unavailable("deepseek", "no-credentials")
     try:

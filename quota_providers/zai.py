@@ -295,6 +295,9 @@ def _subscription_plan(payload: Any) -> tuple[Optional[str], Optional[str]]:
         # plan as the active subscription with its renewal date. An unknown
         # status (empty) is not treated as a veto -- plenty of live responses
         # carry no status field -- but a stated non-active one is.
+        # Conversely, an explicit `valid: false` vetoes even an ACTIVE status.
+        if valid is False:
+            continue
         if valid is not True and status not in ("ACTIVE", "NORMAL", "OK"):
             continue
         if status and status not in ("ACTIVE", "NORMAL", "OK"):
