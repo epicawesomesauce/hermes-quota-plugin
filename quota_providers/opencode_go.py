@@ -384,8 +384,7 @@ def _attempt_usage(api_key: str, timeout: float = _REQUEST_TIMEOUT_S) -> tuple[O
         method="GET",
     )
     try:
-        with urlopen_no_redirect(request, timeout=15) as resp:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
+        with urlopen_no_redirect(request, timeout=timeout) as resp:
             return resp.read(), None, False
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):

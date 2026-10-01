@@ -868,9 +868,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
         # when Hermes core is unimportable, and they exercise the parser rather
         # than the path that ships.
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin, "urlopen_no_redirect",
              mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
-             mock.patch.object(builtin.urllib.request, "urlopen",
+             mock.patch.object(builtin, "urlopen_no_redirect",
                                _urlopen_returning(_ANTHROPIC_LIMITS_PAYLOAD)):
             res = builtin._fetch_anthropic()
         self.assertEqual(
@@ -887,9 +886,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
         # when Hermes core is unimportable, and they exercise the parser rather
         # than the path that ships.
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin, "urlopen_no_redirect",
              mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
-             mock.patch.object(builtin.urllib.request, "urlopen",
+             mock.patch.object(builtin, "urlopen_no_redirect",
                                _urlopen_returning(_ANTHROPIC_LIMITS_PAYLOAD)):
             res = builtin._fetch_anthropic()
         self.assertEqual(
@@ -914,9 +912,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
         # a machine where Hermes core is importable this test would otherwise
         # get windows == [] and pass for the wrong reason.
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin, "urlopen_no_redirect",
              mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
-             mock.patch.object(builtin.urllib.request, "urlopen",
+             mock.patch.object(builtin, "urlopen_no_redirect",
                                _urlopen_returning(payload)):
             res = builtin._fetch_anthropic()
         self.assertEqual([w.label for w in res.windows], ["Current week", "Fable week"])
@@ -943,9 +940,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
             raise OSError("down")
 
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin, "urlopen_no_redirect", _boom):
              mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
-             mock.patch.object(builtin.urllib.request, "urlopen", _boom):
+             mock.patch.object(builtin, "urlopen_no_redirect", _boom):
             res = builtin._fetch_anthropic()
         self.assertEqual(res.unavailable_reason, "fetch-error:OSError")
 
@@ -959,9 +955,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
             return _FakeResponse(json.dumps(_ANTHROPIC_LIMITS_PAYLOAD).encode())
 
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin, "urlopen_no_redirect", _opener):
              mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
-             mock.patch.object(builtin.urllib.request, "urlopen", _opener):
+             mock.patch.object(builtin, "urlopen_no_redirect", _opener):
             res = builtin._fetch_anthropic()
         self.assertIsNone(res.unavailable_reason)
         self.assertEqual(len(seen), 1)
