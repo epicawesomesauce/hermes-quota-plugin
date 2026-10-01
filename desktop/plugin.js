@@ -786,22 +786,35 @@ function parseJsonOutput(output, requiredKey) {
 
 	// Cap on opener retries; see the loop below for why. Declared inside the
 	// function because tests/test_widget_json.py evaluates it in isolation.
-	const maxAttempts = 256;
+	// Recovery needs roughly openers+1 attempts, so this must exceed the number
+	// of openers a real payload can hide behind. It also bounds the worst case,
+	// so it cannot be unbounded. 1024 recovers well past any realistic
+	// diagnostic (the fixtures use three, and 1000 objects ahead of a payload
+	// still recovers) while keeping the pathological case bounded: 60k
+	// unmatched openers parse in ~180ms, 200k in ~1.8s. Exceeding it throws --
+	// never a partial answer.
+	const maxAttempts = 1024;
 	let cursor = 0;
 	// Bound the retry. The scan below restarts from `start + 1` after a
 	// rejected span, which is what lets a payload be recovered from inside a
 	// gateway diagnostic -- but it is also quadratic, because every retry
 	// re-walks the rest of the output. 16k unmatched openers measured 2.4s and
-	// 60k measured 19.3s, all of it inside queryFn on the render path. A real
+	// 60k measured 17.7s, all of it inside queryFn on the render path. A real
 	// payload sits after a handful of openers at most (the diagnostic cases in
 	// test_widget_json use three), so capping the attempts keeps the recovery
-	// behaviour and makes the work linear in the output length.
+	// behaviour and bounds the work. Not linear, though: each attempt can still
+	// rescan the tail, so the cost is attempts x remaining length. Measured on
+	// this machine it stays flat to 60k (6/26/49/75/174ms at 2k-60k) and then
+	// jumps to ~557ms at 120k -- bounded, not asymptotic.
 	let attempts = 0;
 	while (cursor < text.length) {
 		if (attempts >= maxAttempts) {
-			// Out of attempts. Fall back to a plain JSON.parse of the whole
-			// output rather than giving up: the common case is a clean payload
-			// and this keeps it working.
+			// Out of attempts. The whole-output JSON.parse at the top of this
+			// function already ran and failed, which is what firstError holds;
+			// re-throwing it rather than returning a partial answer is the
+			// honest outcome. Recovery needs about openers+1 attempts, so 256
+			// is generous -- but it is a cliff, and maxAttempts openers before a valid
+			// payload fails where the old parser recovered.
 			throw firstError || new Error("invalid JSON output");
 		}
 		attempts += 1;
