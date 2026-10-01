@@ -51,25 +51,34 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
+from .base import Deadline, QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _PROVIDER_ID = "cursor"
 _API_ROOT = "https://api2.cursor.sh/aiserver.v1.DashboardService"
 _REFRESH_URL = "https://api2.cursor.sh/auth/exchange_user_api_key"
 _KEYCHAIN_SERVICE = "cursor-access-token"
 _KEYCHAIN_REFRESH_SERVICE = "cursor-refresh-token"
-# Keychain read plus two sequential RPCs must finish inside the cache sweep
-# budget (quota_cache.REFRESH_BUDGET_S = 20s): 3 + 7 + 7 = 17s worst case.
+# The happy path is a keychain read plus one RPC: 3 + 7 = 10s. The refresh
+# path is longer -- a second keychain read, the exchange, a keychain write and
+# a retried RPC -- so 3+7+3+7+3+7 = 30s, more than the cache sweep budget
+# (quota_cache.REFRESH_BUDGET_S = 20s) where an overrun is recorded as `timeout`
+# and the provider loses its previous value. Every call in both paths now
+# shares one deadline.
 _REFRESH_TIMEOUT_S = 7
 _KEYCHAIN_TIMEOUT_S = 3
 _HTTP_TIMEOUT_S = 7
+_FETCH_BUDGET_S = 18.0
 
 
 # -- credential resolution ----------------------------------------------------
 
 
-def _keychain_token(service: str = _KEYCHAIN_SERVICE) -> Optional[str]:
+def _keychain_token(service: str = _KEYCHAIN_SERVICE,
+                      deadline: "Deadline | None" = None) -> Optional[str]:
     if sys.platform != "darwin":
+        return None
+    budget = deadline.slice(_KEYCHAIN_TIMEOUT_S) if deadline else _KEYCHAIN_TIMEOUT_S
+    if budget <= 0:
         return None
     try:
         completed = subprocess.run(
@@ -77,7 +86,7 @@ def _keychain_token(service: str = _KEYCHAIN_SERVICE) -> Optional[str]:
             check=False,
             capture_output=True,
             text=True,
-            timeout=_KEYCHAIN_TIMEOUT_S,
+            timeout=budget,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -115,11 +124,12 @@ def _auth_file_token() -> Optional[str]:
     return None
 
 
-def resolve_access_token() -> Optional[str]:
-    return _keychain_token() or _auth_file_token()
+def resolve_access_token(deadline: "Deadline | None" = None) -> Optional[str]:
+    return _keychain_token(deadline=deadline) or _auth_file_token()
 
 
-def resolve_refresh_token(access_token: str) -> tuple[Optional[str], Optional[str]]:
+def resolve_refresh_token(access_token: str,
+                          deadline: "Deadline | None" = None) -> tuple[Optional[str], Optional[str]]:
     """Return ``(refresh_token, storage_kind)`` for a rejected access token."""
     data = _auth_file_data()
     file_access = data.get("accessToken") if data else None
@@ -135,7 +145,7 @@ def resolve_refresh_token(access_token: str) -> tuple[Optional[str], Optional[st
     # The access-token lookup intentionally remains the fast path. Only an
     # authentication failure reaches this fallback, so the extra keychain read
     # does not consume the normal refresh budget.
-    refresh = _keychain_token(_KEYCHAIN_REFRESH_SERVICE)
+    refresh = _keychain_token(_KEYCHAIN_REFRESH_SERVICE, deadline=deadline)
     return (refresh, "keychain") if refresh else (None, None)
 
 
@@ -226,7 +236,8 @@ def parse_usage(data: Any) -> tuple[list[QuotaWindow], list[str]]:
 # -- network ------------------------------------------------------------------
 
 
-def _post(method: str, token: str) -> tuple[Optional[Any], Optional[str]]:
+def _post(method: str, token: str,
+         *, timeout: float = _HTTP_TIMEOUT_S) -> tuple[Optional[Any], Optional[str]]:
     request = urllib.request.Request(
         f"{_API_ROOT}/{method}",
         data=b"{}",
@@ -241,6 +252,7 @@ def _post(method: str, token: str) -> tuple[Optional[Any], Optional[str]]:
     )
     try:
         with urlopen_no_redirect(request, timeout=_HTTP_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             body = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -254,7 +266,8 @@ def _post(method: str, token: str) -> tuple[Optional[Any], Optional[str]]:
         return None, "bad-json"
 
 
-def _refresh_access_token(refresh_token: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+def _refresh_access_token(refresh_token: str,
+                              *, timeout: float = _REFRESH_TIMEOUT_S) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Exchange a Cursor refresh token for the next access-token pair."""
     request = urllib.request.Request(
         _REFRESH_URL,
@@ -269,6 +282,7 @@ def _refresh_access_token(refresh_token: str) -> tuple[Optional[str], Optional[s
     )
     try:
         with urlopen_no_redirect(request, timeout=_REFRESH_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             body = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -328,7 +342,8 @@ def _persist_auth_file(access_token: str, refresh_token: Optional[str]) -> None:
                 pass
 
 
-def _store_keychain_token(service: str, token: str) -> None:
+def _store_keychain_token(service: str, token: str,
+                         timeout: Optional[float] = None) -> None:
     if sys.platform != "darwin":
         return
     try:
@@ -340,59 +355,88 @@ def _store_keychain_token(service: str, token: str) -> None:
             check=False,
             capture_output=True,
             text=True,
-            timeout=_KEYCHAIN_TIMEOUT_S,
+            timeout=_KEYCHAIN_TIMEOUT_S if timeout is None else timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         return
 
 
 def _persist_refreshed_credentials(
-    storage_kind: Optional[str], access_token: str, refresh_token: Optional[str]
+    storage_kind: Optional[str], access_token: str, refresh_token: Optional[str],
+    timeout: Optional[float] = None,
 ) -> None:
     if storage_kind == "auth-file":
         _persist_auth_file(access_token, refresh_token)
     elif storage_kind == "keychain":
-        _store_keychain_token(_KEYCHAIN_SERVICE, access_token)
+        # Two serial `security` subprocesses, so a stalled first write would
+        # otherwise add a second full timeout past the sweep budget. The
+        # refresh token is best-effort: an access token already stored is worth
+        # more than a half-finished pair.
+        # Each write gets at most one _KEYCHAIN_TIMEOUT_S, and the pair at most
+        # the slice the caller passed -- handing write #1 the whole slice and
+        # write #2 the remainder let the pair overrun by a full
+        # _KEYCHAIN_TIMEOUT_S, which is how the provider still exceeded the
+        # 20s sweep (measured 21.0s).
+        first = (_KEYCHAIN_TIMEOUT_S if timeout is None
+                 else min(float(timeout), _KEYCHAIN_TIMEOUT_S))
+        _store_keychain_token(_KEYCHAIN_SERVICE, access_token, timeout=first)
         if refresh_token:
-            _store_keychain_token(_KEYCHAIN_REFRESH_SERVICE, refresh_token)
+            # Whatever is left. `_store_keychain_token` treats 0 as fail-fast,
+            # so the refresh token is still attempted: dropping it would leave
+            # the account unable to refresh again.
+            remaining = (None if timeout is None
+                         else max(0.0, float(timeout) - first))
+            _store_keychain_token(_KEYCHAIN_REFRESH_SERVICE, refresh_token,
+                                  timeout=remaining)
 
 
-def _plan_name(token: str) -> Optional[str]:
-    data, _ = _post("GetPlanInfo", token)
+def _plan_name(token: str, timeout: float = _HTTP_TIMEOUT_S) -> Optional[str]:
+    data, _ = _post("GetPlanInfo", token, timeout=timeout)
     info = data.get("planInfo") if isinstance(data, dict) else None
     name = info.get("planName") if isinstance(info, dict) else None
     return name.strip() if isinstance(name, str) and name.strip() else None
 
 
 def fetch_cursor_quota() -> QuotaResult:
+    # The keychain reads, the RPC, the exchange and a retried RPC are all
+    # serial, so they share one deadline sized for the sweep.
+    deadline = Deadline(_FETCH_BUDGET_S)
     try:
-        token = resolve_access_token()
+        token = resolve_access_token(deadline)
         if not token:
             return build_unavailable(_PROVIDER_ID, "no-credentials")
-        data, reason = _post("GetCurrentPeriodUsage", token)
-        if data is None and reason == "auth-failed":
-            refresh_token, storage_kind = resolve_refresh_token(token)
+        data, reason = _post("GetCurrentPeriodUsage", token,
+                             timeout=deadline.slice(_HTTP_TIMEOUT_S))
+        if data is None and reason == "auth-failed" and not deadline.expired():
+            refresh_token, storage_kind = resolve_refresh_token(token, deadline)
             if refresh_token:
-                fresh_token, rotated_refresh, refresh_reason = _refresh_access_token(refresh_token)
+                fresh_token, rotated_refresh, refresh_reason = _refresh_access_token(
+                    refresh_token, timeout=deadline.slice(_REFRESH_TIMEOUT_S))
                 if fresh_token:
                     _persist_refreshed_credentials(
                         storage_kind,
                         fresh_token,
                         rotated_refresh or refresh_token,
+                        timeout=deadline.slice(2 * _KEYCHAIN_TIMEOUT_S),
                     )
                     token = fresh_token
-                    data, reason = _post("GetCurrentPeriodUsage", token)
+                    data, reason = _post("GetCurrentPeriodUsage", token,
+                                         timeout=deadline.slice(_HTTP_TIMEOUT_S))
                 else:
                     reason = refresh_reason or reason
         if data is None:
+            if deadline.expired():
+                return build_unavailable(_PROVIDER_ID, "timeout")
             return build_unavailable(_PROVIDER_ID, reason or "no-data")
         windows, details = parse_usage(data)
         if not windows and not details:
             return build_unavailable(_PROVIDER_ID, "no-data")
+        plan = (None if deadline.expired()
+                else _plan_name(token, deadline.slice(_HTTP_TIMEOUT_S)))
         return QuotaResult(
             label=_PROVIDER_ID,
             windows=windows,
-            plan=_plan_name(token),
+            plan=plan,
             unavailable_reason=None,
             details=details,
         )

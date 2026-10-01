@@ -180,7 +180,17 @@ class CursorFetcherTests(unittest.TestCase):
                 ("GetPlanInfo", "Bearer fresh-token"),
             ],
         )
-        persist.assert_called_once_with("auth-file", "fresh-token", "rotated-refresh")
+        # The signature gained a keyword-only `timeout` so the keychain path
+        # can share one slice of the sweep budget (see #38). The three values
+        # this assertion pins are unchanged; assert the slice separately so a
+        # dropped bound is caught rather than folded into one loose check.
+        persist.assert_called_once_with(
+            "auth-file", "fresh-token", "rotated-refresh",
+            timeout=mock.ANY)
+        self.assertLessEqual(
+            persist.call_args.kwargs["timeout"],
+            cursor._FETCH_BUDGET_S,
+            "the persist slice must fit inside the provider budget")
 
     def test_garbage_and_empty_payloads(self):
         self.assertEqual(_fetch({"GetCurrentPeriodUsage": b"<html>"}).unavailable_reason, "bad-json")
