@@ -136,25 +136,40 @@ class RedirectSafetyTests(unittest.TestCase):
                          + ", ".join(offenders))
 
     def test_grok_cookie_is_not_replayed_to_a_redirect_target(self) -> None:
-        """Grok ships a session cookie; a 302 must not carry it onward."""
-        from quota_providers import grok
+        """Grok ships a session cookie; a 302 must not carry it onward.
 
-        redirect = urllib.error.HTTPError(
-            self.redirect_url, 302, "Found", email.message.Message(), None)
-        with mock.patch.object(grok, "urlopen_no_redirect", side_effect=redirect):
-            with mock.patch.object(grok, "_load_cookies",
-                                   return_value="sess=REAL-SESSION"), \
-                 mock.patch.object(grok, "_grok_enabled", return_value=True), \
-                 mock.patch.object(grok, "_fetch_grok_optin",
-                                   return_value=grok.build_unavailable("grok", "no-data")):
-                try:
-                    grok.fetch_grok_quota()
-                except Exception:
-                    pass
-            if redirect.fp is not None:
-                redirect.close()
-        self.assertIsNone(_Target.received.get("cookie"),
-                          "a grok session cookie reached the redirect target")
+        This drives the REAL opener against the loopback redirect server. An
+        earlier version mocked grok.urlopen_no_redirect to raise HTTPError(302),
+        so no request was ever made and _Target.received stayed {} -- the
+        assertion could not fail in any code state.
+        """
+        from quota_providers import base, grok
+
+        # Preconditions: the test is only meaningful if the target was reached
+        # by something. Assert the harness itself works first.
+        self.assertTrue(hasattr(_Target, "received"))
+
+        with mock.patch.object(grok, "_load_cookies",
+                               return_value="sess=REAL-SESSION"), \
+             mock.patch.object(grok, "_grok_enabled", return_value=True):
+            # Call the opener directly with the cookie grok would send, so the
+            # only thing under test is whether the opener follows the redirect.
+            request = urllib.request.Request(
+                self.redirect_url,
+                headers={"Cookie": "sess=REAL-SESSION",
+                         "Authorization": "Bearer SECRET"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                base.urlopen_no_redirect(request, timeout=5)
+            if ctx.exception.fp is not None:
+                ctx.exception.close()
+
+        # The whole point: the redirect target never saw the credential.
+        self.assertIsNone(
+            _Target.received.get("cookie"),
+            "a grok session cookie reached the redirect target: %r"
+            % (_Target.received,))
+        self.assertIsNone(_Target.received.get("authorization"))
 
     def test_three_original_providers_share_the_one_opener(self) -> None:
         """api_keys/minimax/openrouter keep working through the shared opener."""
