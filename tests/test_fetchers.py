@@ -907,7 +907,12 @@ class AnthropicScopedLimitTests(unittest.TestCase):
                  "scope": {"model": {"display_name": "Fable"}}},
             ]
         }
+        # The OAuth classifier must be stubbed alongside the token: builtin
+        # drops a token the core reports as non-OAuth (builtin.py:165), so on
+        # a machine where Hermes core is importable this test would otherwise
+        # get windows == [] and pass for the wrong reason.
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
+             mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
              mock.patch.object(builtin.urllib.request, "urlopen",
                                _urlopen_returning(payload)):
             res = builtin._fetch_anthropic()
