@@ -48,6 +48,34 @@ for profile in "${profiles[@]}"; do
   desired_disabled+=("$(printf '%s' "$disabled" | hermes_config_remove_quota)")
 done
 
+# Resolve link ownership before moving the installed directories. `readlink -f`
+# is not available on macOS, and a failing command substitution inherits this
+# script's ERR trap (which would otherwise roll back from inside the subshell).
+# Python's stdlib realpath is portable and handles relative and dot-dot targets.
+RESOLVED_QUOTA_PLUGIN="$("$PYTHON_BIN" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$QUOTA_PLUGIN")"
+RESOLVED_QUOTA_DESKTOP="$("$PYTHON_BIN" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$QUOTA_DESKTOP")"
+OWNED_LINKS=()
+OWNED_LINK_TARGETS=()
+for profile in "${profiles[@]}"; do
+  [ -z "$profile" ] && continue
+  base="$HOME_DIR/profiles/$profile"
+  for rel in plugins/quota desktop-plugins/quota; do
+    link="$base/$rel"
+    [ -L "$link" ] || continue
+    target="$(readlink "$link")"
+    resolved="$("$PYTHON_BIN" -c 'import os,sys; print(os.path.realpath(os.path.join(os.path.dirname(sys.argv[1]),sys.argv[2])))' "$link" "$target")"
+    case "$resolved" in
+      "$RESOLVED_QUOTA_PLUGIN"|"$RESOLVED_QUOTA_DESKTOP")
+        OWNED_LINKS+=("$link")
+        OWNED_LINK_TARGETS+=("$target")
+        ;;
+      *)
+        echo "Leaving $link in place (points at $target, not this install)." >&2
+        ;;
+    esac
+  done
+done
+
 mkdir -p "$HOME_DIR"
 STAGE_DIR="$(mktemp -d "$HOME_DIR/.quota-uninstall.XXXXXX")"
 trap 'rm -rf "$STAGE_DIR" || true' EXIT
@@ -96,42 +124,18 @@ for i in "${!profiles[@]}"; do
   hermes_config_apply "${profiles[$i]}" plugins.disabled "${before_disabled_present[$i]}" "${before_disabled[$i]}" "${desired_disabled[$i]}"
 done
 
-# Remove the per-profile symlinks install.sh creates (plugins/quota +
-# desktop-plugins/quota under every named profile). Only remove symlinks —
-# a real directory there was not created by us, so leave it alone.
+# Remove only the per-profile symlinks whose ownership was resolved before
+# moving the installed directories. A real directory was not created by us,
+# so it is never included in OWNED_LINKS.
 REMOVED_LINKS=0
-for profile in "${profiles[@]}"; do
-  [ -z "$profile" ] && continue   # "" = default profile -> global roots handled above
-  base="$HOME_DIR/profiles/$profile"
-  for rel in plugins/quota desktop-plugins/quota; do
-    link="$base/$rel"
-    # Only remove a link that points at the tree we installed. The comment
-    # above says "a real directory there was not created by us, so leave it
-    # alone" -- but a symlink to the user's own dev checkout was removed too,
-    # and never restored.
-    if [ -L "$link" ]; then
-      target="$(readlink "$link")"
-      # Resolve the link's target without cd'ing into it. A hand-written link using
-      # a relative path or ".." segments still points at the tree we installed,
-      # and a string compare against the absolute install path would leave it
-      # behind as a dangling link. `cd` cannot be used here: the link sits at
-      # the path being removed, so entering it and then deleting the tree
-      # leaves the shell with an unreachable cwd and `pwd` fails. Fall back to
-      # the raw target when the link does not resolve, so an unresolvable link
-      # somewhere else is still left alone.
-      resolved="$(readlink -f -- "$link" 2>/dev/null)" || resolved=""
-      [ -n "$resolved" ] || resolved="$target"
-      case "$resolved" in
-        "$QUOTA_PLUGIN"|"$QUOTA_DESKTOP")
-          rm "$link"
-          REMOVED_LINKS=$((REMOVED_LINKS + 1))
-          ;;
-        *)
-          echo "Leaving $link in place (points at $target, not this install)." >&2
-          ;;
-      esac
-    fi
-  done
+for i in "${!OWNED_LINKS[@]}"; do
+  link="${OWNED_LINKS[$i]}"
+  target="${OWNED_LINK_TARGETS[$i]}"
+  # Avoid deleting a link that changed after the ownership snapshot.
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+    rm "$link"
+    REMOVED_LINKS=$((REMOVED_LINKS + 1))
+  fi
 done
 
 trap - ERR

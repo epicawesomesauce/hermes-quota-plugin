@@ -93,6 +93,10 @@ DESKTOP_INSTALLED=0
 # with the other rollback state, before rollback() is defined and the ERR trap
 # is armed below.
 CREATED_LINKS=()
+# Existing profile symlinks are updated in place during reinstall. Keep their
+# original link targets so rollback restores them rather than dropping them.
+PREEXISTING_LINKS=()
+PREEXISTING_LINK_TARGETS=()
 
 rollback() {
   status=$?
@@ -108,6 +112,13 @@ rollback() {
   # dangling at a plugin dir that no longer exists.
   for link in "${CREATED_LINKS[@]+"${CREATED_LINKS[@]}"}"; do
     if [ -L "$link" ]; then rm -f "$link"; fi
+  done
+
+  for i in "${!PREEXISTING_LINKS[@]}"; do
+    link="${PREEXISTING_LINKS[$i]}"
+    old_target="${PREEXISTING_LINK_TARGETS[$i]}"
+    rm -f "$link" || true
+    ln -s "$old_target" "$link" || true
   done
 
   i=0
@@ -157,6 +168,8 @@ for profile in "${profiles[@]}"; do
     link="$base/$rel"
     mkdir -p "$(dirname "$link")"
     if [ -L "$link" ]; then
+      PREEXISTING_LINKS+=("$link")
+      PREEXISTING_LINK_TARGETS+=("$(readlink "$link")")
       ln -sfn "$target" "$link"
     elif [ -e "$link" ]; then
       echo "Warning: $link exists and is not a symlink; leaving it untouched." >&2
