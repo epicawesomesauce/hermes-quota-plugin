@@ -68,10 +68,11 @@ _API_URL = "https://opencode.ai/zen/go/v1/usage"
 _RETRY_ATTEMPTS = 4
 _RETRY_BACKOFF_SECONDS = (0.25, 0.5, 1.0)
 _TRANSIENT_HTTP_STATUSES = (429, 500, 502, 504)
-# One request, and the total the retry loop may spend. The sweep budget is
-# quota_cache.REFRESH_BUDGET_S (20s); an overrun is recorded as `timeout` and
-# the provider loses its previous value. Four 15s attempts plus backoff is
-# ~61.75s, so the attempts share one deadline instead.
+# The retry-loop budget. It caps request socket timeouts and the total
+# request/backoff time the fetcher schedules, but urllib's timeout is not a
+# hard wall-clock limit: a response that keeps trickling bytes can stay active
+# past this budget. The cache sweep records a still-running provider as
+# `timeout` after its wait budget, but does not cancel its daemon worker.
 _REQUEST_TIMEOUT_S = 15.0
 _FETCH_BUDGET_S = 15.0
 
@@ -372,7 +373,9 @@ def _attempt_usage(api_key: str, timeout: float = _REQUEST_TIMEOUT_S) -> tuple[O
     ``(None, unavailable_reason, retryable)`` on failure.  ``retryable`` marks
     the failures that are worth another attempt: the endpoint's intermittent
     503 "Go usage is unavailable", other 5xx/429 statuses, and transport
-    errors.  A rejected credential is never retried.
+    errors.  A rejected credential is never retried. ``timeout`` is passed to
+    ``urllib`` as a socket inactivity timeout, not a hard wall-clock cap for the
+    complete response body.
     """
     request = urllib.request.Request(
         _API_URL,
@@ -387,13 +390,15 @@ def _attempt_usage(api_key: str, timeout: float = _REQUEST_TIMEOUT_S) -> tuple[O
         with urlopen_no_redirect(request, timeout=timeout) as resp:
             return resp.read(), None, False
     except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
+        code = exc.code
+        exc.close()
+        if code in (401, 403):
             return None, "auth-failed", False
-        if exc.code == 503:
+        if code == 503:
             # The vendor's own wording for this flap; keep it recognizable
             # instead of surfacing a bare http-503.
             return None, "usage-unavailable", True
-        return None, f"http-{exc.code}", exc.code in _TRANSIENT_HTTP_STATUSES
+        return None, f"http-{code}", code in _TRANSIENT_HTTP_STATUSES
     except Exception as exc:  # noqa: BLE001 - fail-open by contract
         return None, f"fetch-error:{type(exc).__name__}", True
 
@@ -407,8 +412,9 @@ def fetch_usage(
     total_attempts = max(1, attempts)
     reason: Optional[str] = None
     data: Any = None
-    # The retries share one deadline, so a persistently-503 endpoint cannot
-    # spend four full request timeouts inside a 20s sweep.
+    # The retry budget prevents new attempts/backoffs once spent and caps each
+    # urllib socket timeout. It is not an absolute response deadline: a server
+    # that trickles bytes can keep one response active beyond this budget.
     deadline = Deadline(_FETCH_BUDGET_S)
 
     for attempt in range(total_attempts):
@@ -428,7 +434,24 @@ def fetch_usage(
                 break
         if not retryable or attempt == total_attempts - 1:
             break
-        _sleep(_RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS) - 1)])
+        # Preserve an HTTP result already observed (notably the vendor's 503)
+        # when the response itself or its retry backoff reaches the budget.
+        # Reclassifying a received status as `timeout` would discard the most
+        # useful fact we have. Transport failures still report `timeout` once
+        # there is no budget left for another attempt.
+        is_http_failure = reason == "usage-unavailable" or (
+            reason is not None and reason.startswith("http-")
+        )
+        if deadline.expired():
+            if is_http_failure:
+                break
+            return build_unavailable(_PROVIDER_ID, "timeout")
+        backoff = _RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS) - 1)]
+        _sleep(min(backoff, deadline.remaining()))
+        if deadline.expired():
+            if is_http_failure:
+                break
+            return build_unavailable(_PROVIDER_ID, "timeout")
 
     if data is None:
         return build_unavailable(_PROVIDER_ID, reason or "no-data")

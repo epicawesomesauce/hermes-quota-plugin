@@ -100,18 +100,20 @@ def opt_in_flag(value: object) -> bool:
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
 class Deadline:
-    """A wall-clock budget shared across a fetcher's serial requests.
+    """Monotonic budget for serial requests and retry/backoff scheduling.
 
-    ``quota_cache.REFRESH_BUDGET_S`` (20s) bounds the whole sweep, and a
-    provider that overruns it is recorded as ``timeout`` and loses its previous
-    value. A per-request ``timeout=15`` is therefore not a bound on the
-    provider: three serial requests at 15s each is 45s, and four 15s retries
-    with backoff is over 60s.
+    ``quota_cache.REFRESH_BUDGET_S`` (20s) limits how long a cache refresh
+    waits for the provider workers; unfinished providers are recorded as
+    ``timeout``. The cache uses daemon workers and cannot cancel a request that
+    is still blocked in I/O.
 
-    Clamp each request to whatever remains, so the provider as a whole stays
-    inside the sweep. ``minimax`` already does this with a private
-    ``_DEADLINE_S``; this makes it available to every provider and testable
-    with one formula.
+    ``slice()`` caps the timeout passed to the next request, but this is not a
+    hard wall-clock deadline for that request. In particular, ``urllib``'s
+    socket timeout limits an individual blocking socket operation/inactivity;
+    a peer that keeps trickling bytes can keep ``response.read()`` alive beyond
+    the remaining budget. Do not treat this class as request cancellation.
+    It prevents starting work with no budget left and reduces serial request
+    and retry timeouts; it does not bound an active trickling response.
     """
 
     def __init__(self, budget: float, clock=None) -> None:

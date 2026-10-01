@@ -1,15 +1,21 @@
-"""Every provider must fit inside the sweep budget.
+"""Provider scheduling budgets must fit inside the sweep budget.
 
-`quota_cache.REFRESH_BUDGET_S` (20s) bounds the whole sweep. A provider that
-overruns it is recorded as `timeout` and loses its previous value, so a
-per-request `timeout=15` is not a bound on the provider: three serial requests
-at 15s is 45s, and four 15s retries with backoff is over 60s.
+`quota_cache.REFRESH_BUDGET_S` (20s) limits how long a refresh waits for the
+whole sweep; unfinished providers are recorded as `timeout`, but their daemon
+workers are not cancelled. Provider deadlines cap socket timeouts and retry
+scheduling. `urllib` timeouts measure socket inactivity, not total response wall
+time, so a trickling response can outlive its provider budget.
 
-This is `test_cursor.test_requests_fit_sweep_budget`'s formula, ported to the
-providers that never had it. Offline; no network.
+This suite uses mocks and loopback only; no external provider calls.
 """
+import email.message
+import http.server
 import importlib
 import json
+import threading
+import time
+import urllib.error
+import urllib.request
 
 from quota_providers import base as base_mod
 import re
@@ -75,12 +81,12 @@ class DeadlineTests(unittest.TestCase):
 
 
 class ProviderBudgetTests(unittest.TestCase):
-    """Each provider's declared worst case must fit the sweep."""
+    """Each provider's configured scheduling budget must fit the sweep."""
 
     def test_opencode_go_fits(self):
         mod = importlib.import_module("quota_providers.opencode_go")
-        # Attempts share one deadline, so the bound is the budget, not
-        # attempts x timeout.
+        # Attempts share a scheduling budget, not a hard response wall clock:
+        # urllib can keep a trickling body active beyond its socket timeout.
         self.assertLessEqual(mod._FETCH_BUDGET_S, REFRESH_BUDGET_S)
         self.assertLessEqual(mod._REQUEST_TIMEOUT_S, mod._FETCH_BUDGET_S)
         naive = mod._RETRY_ATTEMPTS * mod._REQUEST_TIMEOUT_S + sum(mod._RETRY_BACKOFF_SECONDS)
@@ -119,27 +125,54 @@ def _antigravity_buckets():
 
 
 class DeadlineIsActuallyUsedTests(unittest.TestCase):
-    """A declared budget is not enough; the fetcher must clamp with it."""
+    """A provider budget must prevent further work once exhausted."""
 
-    def test_opencode_go_stops_retrying_once_spent(self):
+    def test_opencode_go_closes_http_error_response(self):
+        mod = importlib.import_module("quota_providers.opencode_go")
+        response = mock.Mock()
+        error = urllib.error.HTTPError(
+            mod._API_URL, 503, "Service Unavailable", email.message.Message(), response)
+        with mock.patch.object(mod, "urlopen_no_redirect", side_effect=error):
+            result = mod._attempt_usage("SYNTHETIC_KEY")
+        self.assertEqual(result[1], "usage-unavailable")
+        response.close.assert_called_once_with()
+
+    def test_opencode_go_preserves_503_when_an_attempt_uses_the_budget(self):
         mod = importlib.import_module("quota_providers.opencode_go")
         clock = FakeClock()
         calls = []
 
         def _always_503(api_key, timeout=15.0):
             calls.append(timeout)
-            clock.advance(timeout)      # the attempt consumed its whole slice
+            clock.advance(timeout)      # the server's 503 arrives at the edge
             return None, "usage-unavailable", True
 
         with mock.patch.object(mod, "_attempt_usage", side_effect=_always_503), \
-             mock.patch.object(mod.time, "monotonic", clock), \
-             mock.patch("time.sleep", lambda _s: None):
-            result = mod.fetch_usage("SYNTHETIC_KEY")
-        self.assertEqual(result.unavailable_reason, "timeout")
+             mock.patch.object(mod.time, "monotonic", clock):
+            result = mod.fetch_usage("SYNTHETIC_KEY", _sleep=lambda _s: None)
+        self.assertEqual(result.unavailable_reason, "usage-unavailable")
         self.assertLess(len(calls), mod._RETRY_ATTEMPTS,
                         "should stop retrying once the budget is spent")
         for timeout in calls:
             self.assertLessEqual(timeout, mod._FETCH_BUDGET_S)
+
+    def test_opencode_go_preserves_503_when_backoff_spends_the_budget(self):
+        mod = importlib.import_module("quota_providers.opencode_go")
+        clock = FakeClock()
+        calls = []
+
+        def _always_503(api_key, timeout=15.0):
+            calls.append(timeout)
+            return None, "usage-unavailable", True
+
+        with mock.patch.object(mod, "_FETCH_BUDGET_S", 0.1), \
+             mock.patch.object(mod, "_attempt_usage", side_effect=_always_503), \
+             mock.patch.object(mod.time, "monotonic", clock):
+            result = mod.fetch_usage(
+                "SYNTHETIC_KEY", _sleep=lambda delay: clock.advance(delay))
+        self.assertEqual(result.unavailable_reason, "usage-unavailable")
+        self.assertEqual(len(calls), 1,
+                         "a retry must not start after backoff consumes its budget")
 
     def test_opencode_go_still_retries_within_budget(self):
         mod = importlib.import_module("quota_providers.opencode_go")
@@ -227,6 +260,94 @@ class DeadlineIsActuallyUsedTests(unittest.TestCase):
             result = mod.fetch_cursor_quota()
         self.assertEqual(result.unavailable_reason, "timeout")
         self.assertGreaterEqual(clock.now, mod._FETCH_BUDGET_S)
+
+
+class UrllibSocketTimeoutLimitationsTests(unittest.TestCase):
+    """Local HTTP cases for timeout/status behavior without provider calls."""
+
+    def test_real_http_503_survives_backoff_exhausting_the_budget(self):
+        mod = importlib.import_module("quota_providers.opencode_go")
+        clock = FakeClock()
+
+        class _UnavailableHandler(http.server.BaseHTTPRequestHandler):
+            requests = 0
+
+            def do_GET(self):  # noqa: N802 - stdlib signature
+                type(self).requests += 1
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, format, *args):  # noqa: A002, ANN001
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _UnavailableHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            local_opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), base_mod.NoRedirectHandler()).open
+            with mock.patch.object(
+                    mod, "_API_URL",
+                    "http://127.0.0.1:%d/usage" % server.server_address[1]), \
+                 mock.patch.object(mod, "_FETCH_BUDGET_S", 0.1), \
+                 mock.patch.object(mod, "_REQUEST_TIMEOUT_S", 1.0), \
+                 mock.patch.object(mod.time, "monotonic", clock), \
+                 mock.patch.object(mod, "urlopen_no_redirect", local_opener):
+                result = mod.fetch_usage(
+                    "SYNTHETIC_KEY", _sleep=lambda delay: clock.advance(delay))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(result.unavailable_reason, "usage-unavailable")
+        self.assertEqual(_UnavailableHandler.requests, 1,
+                         "a retry must not start after backoff consumes its budget")
+
+    def test_trickling_local_response_can_outlive_the_provider_budget(self):
+        mod = importlib.import_module("quota_providers.opencode_go")
+        budget_s = 0.1
+        body = b'{"usage":{"rolling":{"percent":4}}}'
+        interval_s = 0.01
+
+        class _TrickleHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib signature
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                for byte in body:
+                    self.wfile.write(bytes((byte,)))
+                    self.wfile.flush()
+                    time.sleep(interval_s)
+
+            def log_message(self, format, *args):  # noqa: A002, ANN001
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _TrickleHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            local_opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), base_mod.NoRedirectHandler()).open
+            with mock.patch.object(
+                    mod, "_API_URL",
+                    "http://127.0.0.1:%d/usage" % server.server_address[1]), \
+                 mock.patch.object(mod, "_FETCH_BUDGET_S", budget_s), \
+                 mock.patch.object(mod, "_REQUEST_TIMEOUT_S", 1.0), \
+                 mock.patch.object(mod, "urlopen_no_redirect", local_opener):
+                started = time.monotonic()
+                result = mod.fetch_usage("SYNTHETIC_KEY", attempts=1)
+                elapsed = time.monotonic() - started
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertIsNone(result.unavailable_reason)
+        self.assertGreater(elapsed, budget_s,
+                           "the local trickle should demonstrate inactivity-only timeout")
 
 
 class HappyPathsUnchangedTests(unittest.TestCase):

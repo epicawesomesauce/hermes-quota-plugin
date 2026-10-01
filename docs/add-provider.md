@@ -90,8 +90,19 @@ Contract rules (all enforced in review):
 - **No secrets in output or logs.** Fetchers receive credentials, the cache
   stores display data only. Never log headers/cookies/tokens; never put
   account IDs or emails into `details`.
-- **Timeout every request** (`timeout=15` max) and prefer `urllib.request`
-  (stdlib) unless the repo already depends on an HTTP client.
+- **Use the no-redirect seam for authenticated requests.** Import
+  `urlopen_no_redirect` from `.base` and use it for any request carrying a
+  bearer token, cookie, or other credential. Bare `urllib.request.urlopen`
+  follows redirects by default and can replay sensitive headers to the target.
+- **Set a timeout on every request** (`timeout=15` max) and share a monotonic
+  budget across retries or serial calls. `urllib`'s timeout limits socket
+  inactivity, not total response wall time: a server that keeps trickling bytes
+  can keep a read active beyond the budget. The quota-cache sweep records an
+  unfinished provider as `timeout` after its wait budget, but it does not cancel
+  the daemon worker or its blocked request. Do not describe this as a hard
+  wall-clock request deadline unless the transport actually enforces one.
+  Prefer `urllib.request` (stdlib) unless the repo already depends on an HTTP
+  client.
 
 Sensitive-source rule: anything that reads **browser cookies** or other
 user-session material must be **opt-in** (config flag checked at fetch time,
@@ -120,8 +131,9 @@ Add cases to `tests/test_fetchers.py` (stdlib `unittest`, no network):
 - free-tier payload → honest card;
 - garbage response → `bad-json`/`parse-pending`, never a crash.
 
-Use `unittest.mock.patch` on the module's `urlopen`/loader functions — tests
-must pass offline. Then verify live once:
+Use `unittest.mock.patch` on the module's `urlopen_no_redirect`/loader functions —
+tests must pass without an external provider. Loopback servers are suitable for
+redirect and timeout behavior. Then verify live once:
 
 ```bash
 python -c "from quota_providers.<provider> import fetch_<provider>_quota; \

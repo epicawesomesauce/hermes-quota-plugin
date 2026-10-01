@@ -119,18 +119,53 @@ class RedirectSafetyTests(unittest.TestCase):
         import pathlib
 
         providers = pathlib.Path(__file__).resolve().parent.parent / "quota_providers"
+        def _safe_urlopen_aliases(tree):
+            safe = set()
+            # Only imports from the shared base module establish the no-redirect
+            # primitive; a file-name exemption would hide future regressions.
+            for node in tree.body:
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 1
+                    and node.module == "base"
+                ):
+                    for alias in node.names:
+                        if alias.name == "urlopen_no_redirect":
+                            safe.add(alias.asname or alias.name)
+            changed = True
+            while changed:
+                changed = False
+                for node in tree.body:
+                    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    value = node.value
+                    if not isinstance(value, ast.Name) or value.id not in safe:
+                        continue
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name) and target.id not in safe:
+                            safe.add(target.id)
+                            changed = True
+            return safe
+
         offenders = []
+        api_keys_alias_calls = []
         for path in sorted(providers.glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
+            safe_aliases = _safe_urlopen_aliases(tree)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
                 func = ast.unparse(node.func)
-                if func in ("urllib.request.urlopen", "urlopen"):
-                    # api_keys.urlopen is itself the no-redirect alias.
-                    if path.name == "api_keys.py":
-                        continue
+                if func == "urllib.request.urlopen":
                     offenders.append("%s:%d %s" % (path.name, node.lineno, func))
+                elif isinstance(node.func, ast.Name) and node.func.id == "urlopen":
+                    if path.name == "api_keys.py":
+                        api_keys_alias_calls.append(node.lineno)
+                    if node.func.id not in safe_aliases:
+                        offenders.append("%s:%d %s" % (path.name, node.lineno, func))
+        self.assertEqual(len(api_keys_alias_calls), 1,
+                         "api_keys' authenticated request must be checked through its alias")
         self.assertEqual(offenders, [],
                          "these follow redirects while holding a credential: "
                          + ", ".join(offenders))
