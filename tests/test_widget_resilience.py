@@ -185,5 +185,39 @@ class RemainingPctTests(unittest.TestCase):
                 self.assertIsNone(got)
 
 
+class NullProviderRenderTests(unittest.TestCase):
+    """The render path must survive a null provider record.
+
+    asList/asProvider guard the ITERATION, but two sites dereferenced the
+    record before reaching them, so a null still threw inside the pane:
+
+      ProviderChip   `provider.unavailable_reason` -> TypeError on null
+      ProviderRow    `asList(provider.details)`     -> TypeError on null
+
+    The first test evaluates the real helpers; the second pins the source, so
+    dropping the `&&` fails here rather than only in a running pane.
+    """
+
+    @staticmethod
+    def _source() -> str:
+        return (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+    def test_as_list_and_worst_window_tolerate_null(self):
+        # asList is what both render sites rely on for details.
+        for bad in (None, "text", 7, {}, {"a": 1}):
+            with self.subTest(details=bad):
+                self.assertEqual(run_js({"asList": [bad]})["asList"], [])
+        self.assertEqual(run_js({"asList": [[1, 2]]})["asList"], [1, 2])
+        # worstWindow already guarded; make sure it stays that way.
+        self.assertIsNone(run_js({"worstWindow": [None]})["worstWindow"])
+
+    def test_render_sites_carry_the_null_guard(self):
+        src = self._source()
+        self.assertIn("asList(provider && provider.details)", src)
+        self.assertNotIn("asList(provider.details)", src)
+        self.assertIn("const value = provider && provider.unavailable_reason",
+                      src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

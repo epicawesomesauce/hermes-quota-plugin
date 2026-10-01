@@ -1046,7 +1046,7 @@ function QuotaChipWithBar() {
 function ProviderChip({ pid, provider }) {
 	const r = provider && provider.unavailable_reason ? null : worstWindow(provider);
 	const facts = accountFacts(provider);
-	const value = provider.unavailable_reason ? "unavailable" : r != null ? `${r}%` : facts.balances.length ? facts.balances.map(balanceText).join(" · ") : facts.available === true ? "available" : facts.available === false ? "unavailable" : "—";
+	const value = provider && provider.unavailable_reason ? "unavailable" : r != null ? `${r}%` : facts.balances.length ? facts.balances.map(balanceText).join(" · ") : facts.available === true ? "available" : facts.available === false ? "unavailable" : "—";
 	const tone = providerTone(provider);
 	const dot = toneColor(tone);
 	const label = providerMeta(pid).name;
@@ -1098,7 +1098,7 @@ function makeProviderTip(pid, provider) {
 	if (facts.available != null) lines.push(`API calls available: ${facts.available ? "yes" : "no"}`);
 	if (provider.plan) lines.unshift(`Plan: ${provider.plan}`);
 	lines.unshift(meta.name);
-	const details = asList(provider.details);
+	const details = asList(provider && provider.details);
 	if (details.length) lines.push(...details);
 	lines.push("Click to open Quota pane");
 	return lines.join("\n");
@@ -1166,7 +1166,7 @@ function ProviderRow({ id, provider }) {
 	const paneDetail = useValue(paneDetailAtom);
 	const dense = paneDetail !== "clean";
 	const reason = provider ? provider.unavailable_reason : "no-data";
-	const details = asList(provider.details);
+	const details = asList(provider && provider.details);
 	const facts = accountFacts(provider);
 	const displayName = providerMeta(id).name;
 	// Inline sizing is intentional: plugin-only utility classes might not be

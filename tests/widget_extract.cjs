@@ -58,6 +58,8 @@ const SUPPORT = [
 	"asProvider",
 	"remainingPct",
 	"balanceFractionDigits",
+	"accountFacts",
+	"providerTone",
 ];
 const names = Array.from(new Set([...SUPPORT, ...Object.keys(input)]))
 	.filter((n) => src.includes("function " + n + "("));
