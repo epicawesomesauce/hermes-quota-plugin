@@ -391,7 +391,8 @@ def _attempt_usage(api_key: str, timeout: float = _REQUEST_TIMEOUT_S) -> tuple[O
             return resp.read(), None, False
     except urllib.error.HTTPError as exc:
         code = exc.code
-        exc.close()
+        if exc.fp is not None:
+            exc.close()
         if code in (401, 403):
             return None, "auth-failed", False
         if code == 503:
