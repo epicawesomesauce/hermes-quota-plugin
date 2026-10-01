@@ -105,9 +105,31 @@ for profile in "${profiles[@]}"; do
   base="$HOME_DIR/profiles/$profile"
   for rel in plugins/quota desktop-plugins/quota; do
     link="$base/$rel"
+    # Only remove a link that points at the tree we installed. The comment
+    # above says "a real directory there was not created by us, so leave it
+    # alone" -- but a symlink to the user's own dev checkout was removed too,
+    # and never restored.
     if [ -L "$link" ]; then
-      rm "$link"
-      REMOVED_LINKS=$((REMOVED_LINKS + 1))
+      target="$(readlink "$link")"
+      # Resolve the link's target without cd'ing into it. A hand-written link using
+      # a relative path or ".." segments still points at the tree we installed,
+      # and a string compare against the absolute install path would leave it
+      # behind as a dangling link. `cd` cannot be used here: the link sits at
+      # the path being removed, so entering it and then deleting the tree
+      # leaves the shell with an unreachable cwd and `pwd` fails. Fall back to
+      # the raw target when the link does not resolve, so an unresolvable link
+      # somewhere else is still left alone.
+      resolved="$(readlink -f -- "$link" 2>/dev/null)" || resolved=""
+      [ -n "$resolved" ] || resolved="$target"
+      case "$resolved" in
+        "$QUOTA_PLUGIN"|"$QUOTA_DESKTOP")
+          rm "$link"
+          REMOVED_LINKS=$((REMOVED_LINKS + 1))
+          ;;
+        *)
+          echo "Leaving $link in place (points at $target, not this install)." >&2
+          ;;
+      esac
     fi
   done
 done
