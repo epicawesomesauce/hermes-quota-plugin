@@ -433,13 +433,19 @@ function asList(value) {
 	return Array.isArray(value) ? value : [];
 }
 
+function asWindowList(value) {
+	return asList(value).filter(
+		(window) => window && typeof window === "object" && !Array.isArray(window),
+	);
+}
+
 function asProvider(value) {
 	return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 
 function worstWindow(provider) {
 	let worst = null;
-	for (const w of asList(provider && provider.windows)) {
+	for (const w of asWindowList(provider && provider.windows)) {
 		const r = remainingPct(w);
 		if (r == null) continue;
 		if (worst == null || r < worst) worst = r;
@@ -468,44 +474,71 @@ function balanceFractionDigits(raw) {
 	return Math.min(Math.max(2, raw.length - dot - 1), 20);
 }
 
-function balanceText(balance) {
+function balanceText(balance, locale) {
 	const raw = String(balance.total_balance).trim();
 	// Prefer the endpoint's own decimal string: Number() silently rounds past
 	// 2^53 (9007199254740993.00 came back as ...992) and to 17 significant
 	// digits, which Intl's maximumFractionDigits cannot recover.
 	if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
 		const currency = balance.currency;
-		// Take the symbol and its placement from Intl, not a hardcoded "$":
-		// DeepSeek returns CNY and OpenRouter can return any code, so a literal
-		// dollar mislabels the amount. What we cannot let Intl touch is the
-		// value -- formatting it would re-round past 2^53.
-		let prefix = "$";
-		let suffix = "";
+		const digits = Math.max(2, balanceFractionDigits(raw));
+		const [whole, fraction = ""] = raw.replace(/^-/, "").split(".");
+		const shownFraction = (fraction + "0".repeat(digits)).slice(0, digits);
+		let formatted = null;
 		try {
-			const parts = new Intl.NumberFormat(undefined, {
+			const formatter = new Intl.NumberFormat(locale, {
 				style: "currency", currency,
-			}).formatToParts(12345.6);
-			const literal = parts
-				.filter((p) => p.type === "currency")
-				.map((p) => p.value)
-				.join("");
-			const at = parts.findIndex((p) => p.type === "currency");
-			const after = parts.slice(at + 1).some((p) => p.type === "literal");
-			if (literal) {
-				prefix = after ? "" : literal;
-				suffix = after ? literal : "";
+				minimumFractionDigits: 2,
+				maximumFractionDigits: 2,
+			});
+			// Ask Intl only for the locale's formatting pattern. The sample's
+			// numeric value is never used as the reported balance, so large
+			// endpoint strings retain every digit without Number() rounding.
+			const sample = raw.startsWith("-") ? -1234567890123.45 : 1234567890123.45;
+			const parts = formatter.formatToParts(sample);
+			const firstNumber = parts.findIndex((p) => p.type === "integer");
+			let lastNumber = -1;
+			for (let i = firstNumber; i < parts.length; i += 1) {
+				if (["integer", "group", "decimal", "fraction"].includes(parts[i].type)) {
+					lastNumber = i;
+				}
+			}
+			if (firstNumber >= 0 && lastNumber >= firstNumber) {
+				const integerParts = parts
+					.slice(firstNumber, lastNumber + 1)
+					.filter((p) => p.type === "integer");
+				const group = parts.find((p) => p.type === "group")?.value || "";
+				const primarySize = integerParts[integerParts.length - 1]?.value.length || 3;
+				const secondarySize = integerParts.length > 1
+					? integerParts[integerParts.length - 2].value.length
+					: primarySize;
+				let grouped = whole;
+				if (group && primarySize > 0 && secondarySize > 0 && whole.length > primarySize) {
+					let rest = whole;
+					const groups = [rest.slice(-primarySize)];
+					rest = rest.slice(0, -primarySize);
+					while (rest.length > secondarySize) {
+						groups.unshift(rest.slice(-secondarySize));
+						rest = rest.slice(0, -secondarySize);
+					}
+					if (rest) groups.unshift(rest);
+					grouped = groups.join(group);
+				}
+				const decimal = parts.find((p) => p.type === "decimal")?.value || ".";
+				const number = `${grouped}${decimal}${shownFraction}`;
+				formatted = parts.slice(0, firstNumber).map((p) => p.value).join("") +
+					number + parts.slice(lastNumber + 1).map((p) => p.value).join("");
 			}
 		} catch {
-			// Unknown/invalid currency code: keep the dollar fallback rather
-			// than rendering nothing.
+			// Unknown locale/currency: keep a readable fallback rather than
+			// rendering nothing.
 		}
-		const [whole, frac = ""] = raw.replace("-", "").split(".");
-		const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-		const sign = raw.startsWith("-") ? "-" : "";
-		// At least two fraction digits, as the Intl path always produced.
-		const digits = Math.max(2, balanceFractionDigits(raw));
-		const shown = (frac + "0".repeat(digits)).slice(0, digits);
-		return `${prefix}${sign}${grouped}.${shown}${suffix ? ` ${suffix}` : ""} ${currency}`;
+		if (formatted == null) {
+			const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+			const sign = raw.startsWith("-") ? "-" : "";
+			formatted = `$${sign}${grouped}.${shownFraction}`;
+		}
+		return `${formatted} ${currency}`;
 	}
 	const n = Number(raw);
 	const format = (value) => new Intl.NumberFormat(undefined, {
@@ -812,9 +845,10 @@ function parseJsonOutput(output, requiredKey) {
 			// Out of attempts. The whole-output JSON.parse at the top of this
 			// function already ran and failed, which is what firstError holds;
 			// re-throwing it rather than returning a partial answer is the
-			// honest outcome. Recovery needs about openers+1 attempts, so 256
-			// is generous -- but it is a cliff, and maxAttempts openers before a valid
-			// payload fails where the old parser recovered.
+			// honest outcome. Recovery needs about openers+1 attempts, so the
+			// 1024-attempt bound is generous -- but it is a cliff, and reaching it
+			// before a valid payload means recovery fails rather than returning a
+			// partial answer.
 			throw firstError || new Error("invalid JSON output");
 		}
 		attempts += 1;
@@ -1145,7 +1179,7 @@ function makeProviderTip(pid, provider) {
 // Shared: turn a provider's windows into tooltip lines like
 // "  Session · 21% left · resets 5d 19h" / "  5.3 Codex Spark · 5h · 8% left · resets 3h 52m"
 function providerWindowLines(pid, provider) {
-	const windows = asList(provider.windows);
+	const windows = asWindowList(provider && provider.windows);
 	const out = [];
 	for (const w of windows) {
 		const r = remainingPct(w);
@@ -1254,7 +1288,7 @@ function ProviderRow({ id, provider }) {
 		});
 	}
 
-	const windows = asList(provider.windows);
+	const windows = asWindowList(provider && provider.windows);
 	if (windows.length === 0 && details.length === 0 && facts.balances.length === 0 && facts.available == null) {
 		return jsxs("div", {
 			className:

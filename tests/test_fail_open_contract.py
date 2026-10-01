@@ -254,6 +254,39 @@ class MalformedReturnTests(unittest.TestCase):
         self.assertIsNone(record["unavailable_reason"])
         self.assertEqual(record["windows"][0]["used_percent"], 10.0)
 
+    def test_malformed_result_fields_fail_open_during_serialization(self):
+        qc = self._qc()
+        base = importlib.import_module(
+            "quota_plugin_under_test.quota_providers.base")
+        QuotaResult = base.QuotaResult
+        malformed = (
+            {"windows": None},
+            {"windows": [None]},
+            {"account_balances": None},
+        )
+        for fields in malformed:
+            with self.subTest(fields=fields):
+                result = QuotaResult(label="probe", **fields)
+                record = qc._fetch_one("probe", lambda: result)
+                self.assertEqual(record["unavailable_reason"], "fetch-error")
+
+    def test_worker_completes_if_fetch_one_unexpectedly_raises(self):
+        import tempfile
+        from pathlib import Path
+
+        qc = self._qc()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "quota_cache.json"
+            with mock.patch.object(qc, "_cache_path", return_value=str(cache_path)), \
+                    mock.patch.dict(qc.PROVIDER_FETCHERS,
+                                    {"probe": lambda: None}, clear=True), \
+                    mock.patch.object(qc, "_fetch_one",
+                                      side_effect=RuntimeError("unexpected worker failure")):
+                cache = qc.refresh_quota_cache(budget=0.1)
+
+        self.assertEqual(cache["providers"]["probe"]["unavailable_reason"],
+                         "fetch-error")
+
 
 class FailOpenContractIsDocumentedTests(unittest.TestCase):
     """Guard against the contract being quietly dropped from the guide."""

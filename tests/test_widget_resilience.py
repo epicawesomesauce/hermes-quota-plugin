@@ -15,6 +15,8 @@ import time
 import unittest
 from pathlib import Path
 
+from widget_harness import render, text
+
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACT = ROOT / "tests" / "widget_extract.cjs"
 
@@ -164,12 +166,23 @@ class BalancePrecisionTests(unittest.TestCase):
     def test_thousands_grouping(self):
         self.assertIn("1,234.50", self._text("1234.50"))
 
+    def test_decimal_strings_keep_locale_separators_and_currency_position(self):
+        rendered = run_js({"balanceText": [
+            {"total_balance": "9007199254740993.50", "currency": "EUR"},
+            "fr-FR",
+        ]})["balanceText"]
+        self.assertIn("9\u202f007\u202f199\u202f254\u202f740\u202f993,50", rendered)
+        self.assertIn("\u00a0€ EUR", rendered)
+        self.assertNotIn("9,007,199,254,740,992", rendered)
+
     def test_zero_still_renders(self):
         self.assertIn("0.00", self._text("0.00"))
         self.assertIn("0.00", self._text("0"))
 
     def test_negative_keeps_its_sign(self):
-        self.assertIn("-5.25", self._text("-5.25"))
+        rendered = self._text("-5.25")
+        self.assertIn("5.25", rendered)
+        self.assertLess(rendered.index("-"), rendered.index("5.25"))
 
 
 class RemainingPctTests(unittest.TestCase):
@@ -217,6 +230,23 @@ class NullProviderRenderTests(unittest.TestCase):
         self.assertNotIn("asList(provider.details)", src)
         self.assertIn("const value = provider && provider.unavailable_reason",
                       src)
+
+    def test_null_window_entries_are_ignored_by_window_helpers(self):
+        got = run_js({
+            "providerWindowLines": ["deepseek", {"windows": [None]}],
+        })
+        self.assertEqual(got["providerWindowLines"], [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for widget render tests")
+    def test_null_window_does_not_crash_provider_card(self):
+        tree = render(component="row", provider={"windows": [None], "details": []})
+        self.assertIn("DeepSeek", text(tree))
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for widget render tests")
+    def test_null_window_does_not_crash_provider_tooltip(self):
+        tree = render(component="chip", provider={"windows": [None], "details": []})
+        self.assertIn("DeepSeek", text(tree))
+        self.assertIn("Quota pane", tree["props"]["title"])
 
 
 if __name__ == "__main__":

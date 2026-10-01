@@ -52,9 +52,11 @@ function extract(name) {
 
 const input = JSON.parse(fs.readFileSync(fixture, "utf8"));
 // Helpers pulled in for the requested ones, since the extracted functions call
-// each other (balanceText -> balanceFractionDigits, worstWindow -> asList).
+// each other (balanceText -> balanceFractionDigits and window helpers ->
+// asWindowList -> asList).
 const SUPPORT = [
 	"asList",
+	"asWindowList",
 	"asProvider",
 	"remainingPct",
 	"balanceFractionDigits",
