@@ -279,6 +279,68 @@ class HappyPathsUnchangedTests(unittest.TestCase):
                       "_plan_name called without a deadline slice")
         self.assertLessEqual(seen["timeout"], mod._FETCH_BUDGET_S)
 
+    def test_cursor_keychain_pair_cannot_exceed_its_slice(self):
+        """Neither write may get the whole slice; the pair must fit in it.
+
+        Handing write #1 the full pair slice and write #2 the remainder let
+        the two sum to slice + _KEYCHAIN_TIMEOUT_S -- measured 21.0s against
+        a 20s sweep, the exact outcome this branch exists to prevent.
+        """
+        mod = importlib.import_module("quota_providers.cursor")
+        got = []
+
+        def capture(service, token, timeout=None):
+            got.append(timeout)
+
+        for budget in (mod._KEYCHAIN_TIMEOUT_S * 2, mod._KEYCHAIN_TIMEOUT_S, 0.5):
+            with self.subTest(budget=budget):
+                got.clear()
+                with mock.patch.object(mod.sys, "platform", "darwin"), \
+                     mock.patch.object(mod, "_store_keychain_token", capture):
+                    mod._persist_refreshed_credentials("keychain", "a1", "r1",
+                                                       timeout=budget)
+                self.assertEqual(len(got), 2, "both writes must be attempted")
+                self.assertLessEqual(sum(got), budget + 1e-9,
+                                     "the pair exceeded its slice")
+                for t in got:
+                    self.assertLessEqual(t, mod._KEYCHAIN_TIMEOUT_S + 1e-9,
+                                         "a single write may not exceed one timeout")
+
+    def test_a_definitive_http_status_is_not_reported_as_timeout(self):
+        """A status the server returned is a fact; a budget is our own.
+
+        add-provider.md: "unavailable_reason must be truthful." Reporting
+        http-500 as `timeout` points the reader at the sweep rather than at a
+        server that is actually failing.
+        """
+        mod = importlib.import_module("quota_providers.antigravity")
+        for status, expected in ((500, "http-500"), (404, "http-404"),
+                                 (503, "http-503"), (429, "http-429")):
+            with self.subTest(status=status):
+                with mock.patch.object(mod, "_load_credential",
+                                       return_value={"token": "tok"}), \
+                     mock.patch.object(mod, "_access_token",
+                                       return_value=("tok", None)), \
+                     mock.patch.object(mod, "_post", return_value=(None, status)), \
+                     mock.patch.object(mod, "Deadline") as dl:
+                    dl.return_value.expired.return_value = True   # also out of budget
+                    dl.return_value.slice.return_value = 0.0
+                    result = mod.fetch_antigravity_quota()
+                self.assertEqual(result.unavailable_reason, expected)
+
+    def test_a_genuine_exhausted_budget_is_still_timeout(self):
+        """Control: no status at all is a zero-length slice, i.e. a timeout."""
+        mod = importlib.import_module("quota_providers.antigravity")
+        with mock.patch.object(mod, "_load_credential",
+                               return_value={"token": "tok"}), \
+             mock.patch.object(mod, "_access_token", return_value=("tok", None)), \
+             mock.patch.object(mod, "_post", return_value=(None, None)), \
+             mock.patch.object(mod, "Deadline") as dl:
+            dl.return_value.expired.return_value = True
+            dl.return_value.slice.return_value = 0.0
+            result = mod.fetch_antigravity_quota()
+        self.assertEqual(result.unavailable_reason, "timeout")
+
     def test_cursor_keychain_writes_share_one_slice(self):
         """Two serial `security` calls must not each take the full timeout."""
         mod = importlib.import_module("quota_providers.cursor")

@@ -366,14 +366,20 @@ def _persist_refreshed_credentials(
         # otherwise add a second full timeout past the sweep budget. The
         # refresh token is best-effort: an access token already stored is worth
         # more than a half-finished pair.
-        _store_keychain_token(_KEYCHAIN_SERVICE, access_token, timeout=timeout)
+        # Each write gets at most one _KEYCHAIN_TIMEOUT_S, and the pair at most
+        # the slice the caller passed -- handing write #1 the whole slice and
+        # write #2 the remainder let the pair overrun by a full
+        # _KEYCHAIN_TIMEOUT_S, which is how the provider still exceeded the
+        # 20s sweep (measured 21.0s).
+        first = (_KEYCHAIN_TIMEOUT_S if timeout is None
+                 else min(float(timeout), _KEYCHAIN_TIMEOUT_S))
+        _store_keychain_token(_KEYCHAIN_SERVICE, access_token, timeout=first)
         if refresh_token:
-            # Whatever is left after the first write; `_store_keychain_token`
-            # treats a 0 timeout as "try and fail fast". Dropping the refresh
-            # token would leave the account unable to refresh again, so it is
-            # never skipped outright -- the caller sizes the slice instead.
+            # Whatever is left. `_store_keychain_token` treats 0 as fail-fast,
+            # so the refresh token is still attempted: dropping it would leave
+            # the account unable to refresh again.
             remaining = (None if timeout is None
-                         else max(0.0, timeout - _KEYCHAIN_TIMEOUT_S))
+                         else max(0.0, float(timeout) - first))
             _store_keychain_token(_KEYCHAIN_REFRESH_SERVICE, refresh_token,
                                   timeout=remaining)
 

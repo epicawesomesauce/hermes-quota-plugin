@@ -330,11 +330,17 @@ def fetch_antigravity_quota() -> QuotaResult:
         return build_unavailable(
             _PROVIDER_ID, "auth-failed" if status == 401 else "no-subscription")
     if payload is None:
+        # A status the server actually returned is a fact about the endpoint,
+        # not about our budget -- report it even if the deadline also expired.
+        # Only attribute this to a timeout when there was no status at all,
+        # which is what a zero-length slice produces.
+        if status:
+            return build_unavailable(_PROVIDER_ID, f"http-{status}")
         if deadline.expired():
             # Out of budget: a zero-length slice fails immediately, so this is
             # the sweep running out of time, not the endpoint misbehaving.
             return build_unavailable(_PROVIDER_ID, "timeout")
-        return build_unavailable(_PROVIDER_ID, f"http-{status}" if status else "fetch-error")
+        return build_unavailable(_PROVIDER_ID, "fetch-error")
 
     found = _buckets(payload)
     windows = [w for w in (
