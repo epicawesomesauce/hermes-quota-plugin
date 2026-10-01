@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 from .registry import register as _register
 
 
@@ -176,7 +176,7 @@ def _anthropic_usage_payload() -> tuple[Optional[dict[str, Any]], Optional[str]]
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=_ANTHROPIC_TIMEOUT_S) as resp:
+        with urlopen_no_redirect(request, timeout=_ANTHROPIC_TIMEOUT_S) as resp:
             payload = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -210,7 +210,10 @@ def _parse_anthropic_usage(payload: dict[str, Any]) -> tuple[list[QuotaWindow], 
             continue
         if not math.isfinite(used):
             continue
-        if used <= 1:
+        # A 0-1 value is a fraction, except a bare 1.0 which is a whole percent:
+        # the same rule issue #8 settled for opencode_go (`f9e6255`, "preserve
+        # integer percent values"). `used <= 1` rescaled a genuine 1% to 100%.
+        if 0.0 < used < 1.0:
             used *= 100
         if label in seen:
             continue
@@ -480,22 +483,37 @@ def _fetch_codex_with_models() -> QuotaResult:
     from datetime import datetime, timezone
 
     def _iso(ts):
-        if not isinstance(ts, (int, float)):
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
             return None
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+        try:
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            # A timestamp outside the representable range is a schema surprise,
+            # not a crash: this runs after the request try/except has closed.
+            return None
 
     def _window(raw: dict, label: str) -> Optional[QuotaWindow]:
         used = raw.get("used_percent")
         if not isinstance(used, (int, float)) or isinstance(used, bool):
             return None
+        try:
+            used_percent = float(used)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not math.isfinite(used_percent) or not 0.0 <= used_percent <= 100.0:
+            return None
         return QuotaWindow(
             label=label,
-            used_percent=float(used),
+            used_percent=used_percent,
             reset_at=_iso(raw.get("reset_at")),
         )
 
     windows: list[QuotaWindow] = []
-    rate_limit = payload.get("rate_limit") or {}
+    # Everything below runs after the request try/except has closed, so each
+    # value is shape-checked here rather than assumed to be a dict.
+    rate_limit = payload.get("rate_limit")
+    if not isinstance(rate_limit, dict):
+        rate_limit = {}
     for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
         w = _window(rate_limit.get(key) or {}, label)
         if w is not None:
@@ -509,20 +527,26 @@ def _fetch_codex_with_models() -> QuotaResult:
         if not model_name:
             continue
         short = model_name.replace("GPT-", "").replace("-Codex-", " Codex ")
-        inner = extra.get("rate_limit") or {}
+        inner = extra.get("rate_limit")
+        if not isinstance(inner, dict):
+            continue
         for key, label in (("primary_window", "5h"), ("secondary_window", "Weekly")):
             w = _window(inner.get(key) or {}, f"{short} · {label}")
             if w is not None:
                 windows.append(w)
 
     details: list[str] = []
-    reset_credits = payload.get("rate_limit_reset_credits") or {}
+    reset_credits = payload.get("rate_limit_reset_credits")
+    if not isinstance(reset_credits, dict):
+        reset_credits = {}
     banked = reset_credits.get("available_count")
-    if isinstance(banked, (int, float)) and int(banked) > 0:
+    if isinstance(banked, (int, float)) and not isinstance(banked, bool) and int(banked) > 0:
         count = int(banked)
         plural = "s" if count != 1 else ""
         details.append(f"You have {count} reset{plural} banked - use /usage reset to activate")
-    credits = payload.get("credits") or {}
+    credits = payload.get("credits")
+    if not isinstance(credits, dict):
+        credits = {}
     if credits.get("has_credits"):
         balance = credits.get("balance")
         if isinstance(balance, (int, float)):

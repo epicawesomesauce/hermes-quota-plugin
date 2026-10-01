@@ -425,9 +425,27 @@ function remainingPct(w) {
 	return Math.max(0, Math.min(100, Math.round(100 - n)));
 }
 
+// A provider record comes from a JSON cache file that a truncated write, a
+// hand edit, or an older/newer backend can leave in any shape. `x || []` is
+// null-safe but not type-safe: `{}` and `"text"` are both truthy and reach
+// .map/.filter/spread. These normalise, matching accountFacts' Array.isArray.
+function asList(value) {
+	return Array.isArray(value) ? value : [];
+}
+
+function asWindowList(value) {
+	return asList(value).filter(
+		(window) => window && typeof window === "object" && !Array.isArray(window),
+	);
+}
+
+function asProvider(value) {
+	return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
 function worstWindow(provider) {
 	let worst = null;
-	for (const w of provider.windows || []) {
+	for (const w of asWindowList(provider && provider.windows)) {
 		const r = remainingPct(w);
 		if (r == null) continue;
 		if (worst == null || r < worst) worst = r;
@@ -456,8 +474,72 @@ function balanceFractionDigits(raw) {
 	return Math.min(Math.max(2, raw.length - dot - 1), 20);
 }
 
-function balanceText(balance) {
+function balanceText(balance, locale) {
 	const raw = String(balance.total_balance).trim();
+	// Prefer the endpoint's own decimal string: Number() silently rounds past
+	// 2^53 (9007199254740993.00 came back as ...992) and to 17 significant
+	// digits, which Intl's maximumFractionDigits cannot recover.
+	if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+		const currency = balance.currency;
+		const digits = Math.max(2, balanceFractionDigits(raw));
+		const [whole, fraction = ""] = raw.replace(/^-/, "").split(".");
+		const shownFraction = (fraction + "0".repeat(digits)).slice(0, digits);
+		let formatted = null;
+		try {
+			const formatter = new Intl.NumberFormat(locale, {
+				style: "currency", currency,
+				minimumFractionDigits: 2,
+				maximumFractionDigits: 2,
+			});
+			// Ask Intl only for the locale's formatting pattern. The sample's
+			// numeric value is never used as the reported balance, so large
+			// endpoint strings retain every digit without Number() rounding.
+			const sample = raw.startsWith("-") ? -1234567890123.45 : 1234567890123.45;
+			const parts = formatter.formatToParts(sample);
+			const firstNumber = parts.findIndex((p) => p.type === "integer");
+			let lastNumber = -1;
+			for (let i = firstNumber; i < parts.length; i += 1) {
+				if (["integer", "group", "decimal", "fraction"].includes(parts[i].type)) {
+					lastNumber = i;
+				}
+			}
+			if (firstNumber >= 0 && lastNumber >= firstNumber) {
+				const integerParts = parts
+					.slice(firstNumber, lastNumber + 1)
+					.filter((p) => p.type === "integer");
+				const group = parts.find((p) => p.type === "group")?.value || "";
+				const primarySize = integerParts[integerParts.length - 1]?.value.length || 3;
+				const secondarySize = integerParts.length > 1
+					? integerParts[integerParts.length - 2].value.length
+					: primarySize;
+				let grouped = whole;
+				if (group && primarySize > 0 && secondarySize > 0 && whole.length > primarySize) {
+					let rest = whole;
+					const groups = [rest.slice(-primarySize)];
+					rest = rest.slice(0, -primarySize);
+					while (rest.length > secondarySize) {
+						groups.unshift(rest.slice(-secondarySize));
+						rest = rest.slice(0, -secondarySize);
+					}
+					if (rest) groups.unshift(rest);
+					grouped = groups.join(group);
+				}
+				const decimal = parts.find((p) => p.type === "decimal")?.value || ".";
+				const number = `${grouped}${decimal}${shownFraction}`;
+				formatted = parts.slice(0, firstNumber).map((p) => p.value).join("") +
+					number + parts.slice(lastNumber + 1).map((p) => p.value).join("");
+			}
+		} catch {
+			// Unknown locale/currency: keep a readable fallback rather than
+			// rendering nothing.
+		}
+		if (formatted == null) {
+			const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+			const sign = raw.startsWith("-") ? "-" : "";
+			formatted = `$${sign}${grouped}.${shownFraction}`;
+		}
+		return `${formatted} ${currency}`;
+	}
 	const n = Number(raw);
 	const format = (value) => new Intl.NumberFormat(undefined, {
 		style: "currency", currency: balance.currency,
@@ -471,6 +553,7 @@ function balanceText(balance) {
 }
 
 function providerTone(provider) {
+	if (!provider) return "muted";
 	if (provider.unavailable_reason) return "muted";
 	const r = worstWindow(provider);
 	if (r != null) return toneForRemaining(r);
@@ -734,8 +817,41 @@ function parseJsonOutput(output, requiredKey) {
 		firstError = error;
 	}
 
+	// Cap on opener retries; see the loop below for why. Declared inside the
+	// function because tests/test_widget_json.py evaluates it in isolation.
+	// Recovery needs roughly openers+1 attempts, so this must exceed the number
+	// of openers a real payload can hide behind. It also bounds the worst case,
+	// so it cannot be unbounded. 1024 recovers well past any realistic
+	// diagnostic (the fixtures use three, and 1000 objects ahead of a payload
+	// still recovers) while keeping the pathological case bounded: 60k
+	// unmatched openers parse in ~180ms, 200k in ~1.8s. Exceeding it throws --
+	// never a partial answer.
+	const maxAttempts = 1024;
 	let cursor = 0;
+	// Bound the retry. The scan below restarts from `start + 1` after a
+	// rejected span, which is what lets a payload be recovered from inside a
+	// gateway diagnostic -- but it is also quadratic, because every retry
+	// re-walks the rest of the output. 16k unmatched openers measured 2.4s and
+	// 60k measured 17.7s, all of it inside queryFn on the render path. A real
+	// payload sits after a handful of openers at most (the diagnostic cases in
+	// test_widget_json use three), so capping the attempts keeps the recovery
+	// behaviour and bounds the work. Not linear, though: each attempt can still
+	// rescan the tail, so the cost is attempts x remaining length. Measured on
+	// this machine it stays flat to 60k (6/26/49/75/174ms at 2k-60k) and then
+	// jumps to ~557ms at 120k -- bounded, not asymptotic.
+	let attempts = 0;
 	while (cursor < text.length) {
+		if (attempts >= maxAttempts) {
+			// Out of attempts. The whole-output JSON.parse at the top of this
+			// function already ran and failed, which is what firstError holds;
+			// re-throwing it rather than returning a partial answer is the
+			// honest outcome. Recovery needs about openers+1 attempts, so the
+			// 1024-attempt bound is generous -- but it is a cliff, and reaching it
+			// before a valid payload means recovery fails rather than returning a
+			// partial answer.
+			throw firstError || new Error("invalid JSON output");
+		}
+		attempts += 1;
 		let start = cursor;
 		while (
 			start < text.length &&
@@ -910,19 +1026,24 @@ function useQuota() {
 			// cli.exec exposes stdout and stderr as one string; parse the quota
 			// value while ignoring gateway diagnostics. Keep the full envelope so
 			// its installed_sha still feeds the update check.
-			let data;
+			let data = null;
 			try {
 				data = parseJsonOutput(result.output || "{}", "providers");
 			} catch {
-				data = {};
+				// Unreadable this poll. The last good snapshot is left in place --
+				// writing {} here meant one bad read erased the payload, so a
+				// reload afterwards painted nothing. The refresh below still
+				// fires, so a transient gateway diagnostic self-heals.
 			}
-			writeSnapshot(scope, data);
+			if (data) writeSnapshot(scope, data);
 			// Missing age (no cache yet on this gateway) counts as stale.
 			const rawAge = data ? data.age_s : null;
+			// `>=`, not `>`: a payload exactly one interval old is already due.
+			// With `>` the poll drifted a full interval behind, permanently.
 			const stale =
 				rawAge == null ||
 				!Number.isFinite(Number(rawAge)) ||
-				Number(rawAge) > intervalSec;
+				Number(rawAge) >= intervalSec;
 			// Fire the refresh off the poll path and update when it lands.
 			if (stale) {
 				void refreshQuotaCache(scope).then((refreshed) => {
@@ -995,9 +1116,9 @@ function QuotaChipWithBar() {
 }
 
 function ProviderChip({ pid, provider }) {
-	const r = provider.unavailable_reason ? null : worstWindow(provider);
+	const r = provider && provider.unavailable_reason ? null : worstWindow(provider);
 	const facts = accountFacts(provider);
-	const value = provider.unavailable_reason ? "unavailable" : r != null ? `${r}%` : facts.balances.length ? facts.balances.map(balanceText).join(" · ") : facts.available === true ? "available" : facts.available === false ? "unavailable" : "—";
+	const value = provider && provider.unavailable_reason ? "unavailable" : r != null ? `${r}%` : facts.balances.length ? facts.balances.map(balanceText).join(" · ") : facts.available === true ? "available" : facts.available === false ? "unavailable" : "—";
 	const tone = providerTone(provider);
 	const dot = toneColor(tone);
 	const label = providerMeta(pid).name;
@@ -1041,6 +1162,7 @@ function makeWorstTip(worstLabel, worst, providersObj) {
 // plus plan and detail lines (credits, banked resets).
 function makeProviderTip(pid, provider) {
 	const meta = providerMeta(pid);
+	if (!provider) return `${meta.name}: unavailable`;
 	if (provider.unavailable_reason) return `${meta.name}: unavailable (${provider.unavailable_reason})`;
 	const lines = providerWindowLines(pid, provider);
 	const facts = accountFacts(provider);
@@ -1048,7 +1170,7 @@ function makeProviderTip(pid, provider) {
 	if (facts.available != null) lines.push(`API calls available: ${facts.available ? "yes" : "no"}`);
 	if (provider.plan) lines.unshift(`Plan: ${provider.plan}`);
 	lines.unshift(meta.name);
-	const details = provider.details || [];
+	const details = asList(provider && provider.details);
 	if (details.length) lines.push(...details);
 	lines.push("Click to open Quota pane");
 	return lines.join("\n");
@@ -1057,7 +1179,7 @@ function makeProviderTip(pid, provider) {
 // Shared: turn a provider's windows into tooltip lines like
 // "  Session · 21% left · resets 5d 19h" / "  5.3 Codex Spark · 5h · 8% left · resets 3h 52m"
 function providerWindowLines(pid, provider) {
-	const windows = provider.windows || [];
+	const windows = asWindowList(provider && provider.windows);
 	const out = [];
 	for (const w of windows) {
 		const r = remainingPct(w);
@@ -1115,8 +1237,8 @@ function ProviderRow({ id, provider }) {
 	// percentage bars, except OpenRouter's essential key/wallet scope details.
 	const paneDetail = useValue(paneDetailAtom);
 	const dense = paneDetail !== "clean";
-	const reason = provider.unavailable_reason;
-	const details = provider.details || [];
+	const reason = provider ? provider.unavailable_reason : "no-data";
+	const details = asList(provider && provider.details);
 	const facts = accountFacts(provider);
 	const displayName = providerMeta(id).name;
 	// Inline sizing is intentional: plugin-only utility classes might not be
@@ -1166,7 +1288,7 @@ function ProviderRow({ id, provider }) {
 		});
 	}
 
-	const windows = provider.windows || [];
+	const windows = asWindowList(provider && provider.windows);
 	if (windows.length === 0 && details.length === 0 && facts.balances.length === 0 && facts.available == null) {
 		return jsxs("div", {
 			className:

@@ -39,9 +39,12 @@ jobs:
         with:
           node-version: "22"
 
-      - name: node --check every desktop JS file
+      - name: node --check every JS file
+        # desktop/*.js alone missed scripts/render-widget.cjs and
+        # tests/widget_renderer.cjs, so neither harness was ever syntax-checked.
         run: |
-          for f in desktop/*.js; do
+          for f in desktop/*.js desktop/*.cjs scripts/*.cjs tests/*.cjs; do
+            [ -e "$f" ] || continue
             node --check "$f"
             echo "OK $f"
           done
@@ -50,15 +53,28 @@ jobs:
         run: npx --yes @biomejs/biome lint desktop/
 
   shell-scripts:
-    name: Shell script syntax
-    runs-on: ubuntu-latest
+    name: Shell tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: bash -n install/uninstall/scripts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Syntax and isolated install/uninstall regressions
+        env:
+          # runner.temp is a trusted runner-provided path, not event input.
+          HERMES_TEST_SCRATCH: ${{ runner.temp }}/quota-shell-tests
         run: |
-          bash -n install.sh uninstall.sh scripts/hermes-config.sh scripts/hermes-home.sh
-          echo "shell syntax OK"
+          mkdir -p "$HERMES_TEST_SCRATCH"
+          bash -n install.sh uninstall.sh scripts/hermes-config.sh scripts/hermes-home.sh tests/test_install_shell.sh tests/probe_symlink_forms.sh
+          bash tests/test_install_shell.sh
+          bash tests/probe_symlink_forms.sh
 
   manifest:
     name: plugin.yaml sanity

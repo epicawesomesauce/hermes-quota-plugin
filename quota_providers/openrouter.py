@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 from .registry import register
 
 _BASE_URL = "https://openrouter.ai/api/v1"
@@ -86,12 +86,8 @@ def _resolve_credentials() -> list[tuple[str, str]]:
     return result
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None  # Never forward a bearer credential to another endpoint.
-
-
-_urlopen = urllib.request.build_opener(_NoRedirect()).open
+# Never forward a bearer credential to another endpoint (see base.NoRedirectHandler).
+_urlopen = urlopen_no_redirect
 
 
 def _get_json(url, secret):

@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 from typing import Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 _LOAD_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
@@ -74,7 +74,7 @@ def _refresh(creds: dict) -> Optional[str]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             d = json.loads(resp.read())
         return d.get("access_token")
     except Exception:
@@ -86,7 +86,13 @@ def _valid_token(creds: dict) -> Optional[str]:
     tok = creds.get("access_token")
     if not tok:
         return None
-    if exp and time.time() * 1000 >= float(exp) - 30000:
+    try:
+        # A non-numeric expiry_date is a schema surprise, not a crash: this
+        # runs before the fetcher's own error handling.
+        expires_at_ms = float(exp) if exp else 0.0
+    except (TypeError, ValueError):
+        expires_at_ms = 0.0
+    if exp and time.time() * 1000 >= expires_at_ms - 30000:
         return _refresh(creds) or tok
     return tok
 
@@ -102,10 +108,13 @@ def _parse_quota(data: dict) -> Optional[QuotaResult]:
         frac = b.get("remainingFraction")
         if frac is None:
             continue
-        try:
-            left = round(float(frac) * 100.0, 2)
-        except (TypeError, ValueError):
+        if isinstance(frac, bool) or not isinstance(frac, (int, float)):
             continue
+        # A fraction is 0..1 by contract (same guard as antigravity._bucket);
+        # anything else is a schema surprise, not a percentage.
+        if not 0.0 <= frac <= 1.0:
+            continue
+        left = round(float(frac) * 100.0, 2)
         used = round(100.0 - left, 2)
         reset = b.get("resetTime")
         model = b.get("modelId") or "gemini"
@@ -126,14 +135,22 @@ def _post_json(url: str, body: dict, token: str):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             return json.loads(resp.read()), None
     except urllib.error.HTTPError as e:
         try:
             txt = e.read().decode("utf-8", "replace")
         except Exception:
             txt = ""
+        if e.fp is not None:
+            e.close()
         return None, {"code": e.code, "body": txt}
+    except urllib.error.URLError as e:
+        # A DNS or connection failure is a transport error, not an HTTP status;
+        # without this it escaped the fetcher as URLError/OSError.
+        return None, {"code": None, "body": "", "transport": type(e).__name__}
+    except (TimeoutError, OSError) as e:
+        return None, {"code": None, "body": "", "transport": type(e).__name__}
 
 
 def _load_code_assist(token: str) -> Optional[dict]:
@@ -204,9 +221,26 @@ def fetch_gemini_quota() -> QuotaResult:
         project = str(la["cloudaicompanionProject"])
     data, err = _post_json(_QUOTA_URL, {"project": project}, tok)
     if err is not None:
+        if err.get("transport"):
+            # No HTTP status was ever received; a reason of "http-None" would
+            # read as a server answer that never arrived.
+            return build_unavailable("gemini", "fetch-error")
         txt = err.get("body") or ""
-        if err.get("code") in (401, 403) or "UNSUPPORTED_CLIENT" in txt or "IneligibleTier" in txt:
+        txt_lower = txt.lower()
+        # A 401/403 is an auth failure, not a tier verdict. Only the body's own
+        # tier wording justifies consumer-tier-deprecated; a bare invalid_token
+        # or revoked credential means re-auth, and telling the user to migrate
+        # to Antigravity sends them the wrong way.
+        if "unsupported_client" in txt_lower or "ineligibletier" in txt_lower:
             return build_unavailable("gemini", "consumer-tier-deprecated")
+        if err.get("code") == 401:
+            return build_unavailable("gemini", "auth-failed")
+        if err.get("code") == 403:
+            if any(marker in txt_lower for marker in (
+                "invalid_token", "unauthorized", "unauthenticated",
+            )):
+                return build_unavailable("gemini", "auth-failed")
+            return build_unavailable("gemini", "http-403")
         return build_unavailable("gemini", f"http-{err.get('code')}")
     if not isinstance(data, dict):
         return build_unavailable("gemini", "bad-json")

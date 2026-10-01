@@ -89,7 +89,7 @@ def _windows_for(payload):
 
 def _fetch(summary=None, load=None):
     """Run the fetcher with every HTTP boundary mocked to the live shapes."""
-    def _post(path, access_token):  # noqa: ANN001, ARG001
+    def _post(path, access_token, **kwargs):  # noqa: ANN001, ANN003, ARG001
         if path.endswith(mod._QUOTA_PATH):
             return (_LIVE if summary is None else summary), None
         return (_LOAD if load is None else load), None
@@ -163,7 +163,10 @@ class TokenTests(unittest.TestCase):
         with mock.patch.object(mod, "_refresh", return_value="ya29.fresh") as refresh:
             result = mod._access_token(
                 {"token": {"access_token": "stale", "refresh_token": "1//r"}})
-        refresh.assert_called_once_with("1//r")
+        # The refresh now carries the clamped timeout so the fetcher's shared
+        # deadline bounds it; assert the token, not the exact call shape.
+        self.assertEqual(refresh.call_args.args, ("1//r",))
+        self.assertIn("timeout", refresh.call_args.kwargs)
         self.assertEqual(result, ("ya29.fresh", None))
 
     def test_cached_token_used_when_no_refresh_token(self):
@@ -198,14 +201,14 @@ class TokenTests(unittest.TestCase):
             seen["body"] = req.data.decode("utf-8")
             return _FakeResponse(json.dumps({"access_token": "ya29.new"}).encode())
 
-        with mock.patch.object(mod.urllib.request, "urlopen", _opener):
+        with mock.patch.object(mod, "urlopen_no_redirect", _opener):
             self.assertEqual(mod._refresh("1//r"), "ya29.new")
         self.assertIn("grant_type=refresh_token", seen["body"])
         self.assertIn("1071006060591", seen["body"])
 
     def test_refresh_http_error_returns_none(self):
         with mock.patch.object(
-                mod.urllib.request, "urlopen", _urlopen_raising(_http_error(401))):
+                mod, "urlopen_no_redirect", _urlopen_raising(_http_error(401))):
             self.assertIsNone(mod._refresh("1//r"))
 
 
@@ -292,19 +295,19 @@ class FetchTests(unittest.TestCase):
         self.assertTrue(result.has_data())
 
     def test_401_is_auth_failed(self):
-        result = _fetch_with_post(lambda p, t: (None, 401))
+        result = _fetch_with_post(lambda p, t, **kw: (None, 401))
         self.assertEqual(result.unavailable_reason, "auth-failed")
 
     def test_403_is_no_subscription(self):
-        result = _fetch_with_post(lambda p, t: (None, 403))
+        result = _fetch_with_post(lambda p, t, **kw: (None, 403))
         self.assertEqual(result.unavailable_reason, "no-subscription")
 
     def test_other_http_is_reported(self):
-        result = _fetch_with_post(lambda p, t: (None, 500))
+        result = _fetch_with_post(lambda p, t, **kw: (None, 500))
         self.assertEqual(result.unavailable_reason, "http-500")
 
     def test_transport_failure_is_fetch_error(self):
-        result = _fetch_with_post(lambda p, t: (None, None))
+        result = _fetch_with_post(lambda p, t, **kw: (None, None))
         self.assertEqual(result.unavailable_reason, "fetch-error")
 
     def test_no_usable_bucket_is_no_data(self):
@@ -312,10 +315,10 @@ class FetchTests(unittest.TestCase):
 
     def test_json_array_payload_is_no_data(self):
         self.assertEqual(
-            _fetch_with_post(lambda p, t: ([], None)).unavailable_reason, "no-data")
+            _fetch_with_post(lambda p, t, **kw: ([], None)).unavailable_reason, "no-data")
 
     def test_plan_failure_does_not_lose_the_quota(self):
-        def _post(path, token):  # noqa: ANN001, ARG001
+        def _post(path, token, **kwargs):  # noqa: ANN001, ANN003, ARG001
             return (_LIVE, None) if path.endswith(mod._QUOTA_PATH) else (None, 500)
 
         result = _fetch_with_post(_post)
@@ -329,8 +332,12 @@ class RegistrationTests(unittest.TestCase):
         from quota_providers import PROVIDER_FETCHERS
 
         self.assertIn("antigravity", PROVIDER_FETCHERS)
-        # Registered ungated, like every other provider except grok.
-        self.assertIs(PROVIDER_FETCHERS["antigravity"], mod.fetch_antigravity_quota)
+        # Registered ungated, like every other provider except grok. The
+        # registry stores register()'s fail-open wrapper, so compare against
+        # the function it wraps rather than the wrapper's identity.
+        registered = PROVIDER_FETCHERS["antigravity"]
+        self.assertIs(getattr(registered, "__wrapped__", registered),
+                      mod.fetch_antigravity_quota)
 
     def test_secret_literal_stays_split(self):
         # The client secret must stay reassembled so scanners do not flag it.

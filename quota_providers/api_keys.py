@@ -10,6 +10,8 @@ from decimal import Decimal, InvalidOperation
 import urllib.error
 import urllib.request
 
+from .base import urlopen_no_redirect
+
 
 def resolve_api_key(provider: str):
     """Use Hermes' provider-specific dotenv/key_env precedence, not model routing."""
@@ -20,12 +22,8 @@ def resolve_api_key(provider: str):
     return secret.strip() if isinstance(secret, str) and secret.strip() else None
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None  # Never forward a bearer credential to another endpoint.
-
-
-urlopen = urllib.request.build_opener(_NoRedirect()).open
+# Never forward a bearer credential to another endpoint (see base.NoRedirectHandler).
+urlopen = urlopen_no_redirect
 
 
 def get_json(url: str, secret: str):

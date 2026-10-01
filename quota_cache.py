@@ -127,12 +127,20 @@ def _fetch_one(provider_id: str, fetcher: Any) -> dict[str, Any]:
     """Run one fetcher. Fail-open by contract — never raises."""
     try:
         res = fetcher()
+        if res is None:
+            return _unavailable_record(provider_id, "no-data")
+        if not isinstance(res, QuotaResult):
+            logger.debug("quota_cache ▸ fetcher %s returned %r, not a QuotaResult",
+                         provider_id, type(res).__name__)
+            return _unavailable_record(provider_id, "fetch-error")
+        # QuotaResult is mutable and a provider or downstream integration can
+        # still supply malformed fields (for example windows=None). Keep
+        # serialization inside the fail-open boundary just like the fetch.
+        return _result_to_record(res)
     except Exception:
-        logger.debug("quota_cache ▸ fetcher %s crashed", provider_id, exc_info=True)
+        logger.debug("quota_cache ▸ fetcher %s failed while fetching/serializing",
+                     provider_id, exc_info=True)
         return _unavailable_record(provider_id, "fetch-error")
-    if res is None:
-        return _unavailable_record(provider_id, "no-data")
-    return _result_to_record(res)
 
 
 def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
@@ -141,7 +149,7 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
     Bounded by ``budget`` seconds (``REFRESH_BUDGET_S`` default) and run on
     daemon threads, so one hung provider can neither stretch the call nor hold
     the short-lived CLI process open: whatever finished is written, the rest is
-    recorded as ``timeout`` and keeps its previous value. Fail-open per
+    recorded as ``timeout`` and drops the previous value. Fail-open per
     provider: a fetcher that raises, returns nothing, or misses the deadline
     leaves an ``unavailable_reason`` record rather than aborting the sweep.
     Returns the cache dict that was written.
@@ -152,10 +160,21 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
     lock = threading.Lock()
 
     def _worker(pid: str, fetcher: Any, event: threading.Event) -> None:
-        record = _fetch_one(pid, fetcher)
-        with lock:
-            results[pid] = record
-        event.set()
+        record = _unavailable_record(pid, "fetch-error")
+        try:
+            record = _fetch_one(pid, fetcher)
+        except Exception:
+            # Keep the sweep moving even if the fail-open helper itself ever
+            # regresses or is replaced by an integration that raises.
+            logger.debug("quota_cache ▸ worker %s failed", pid, exc_info=True)
+        finally:
+            try:
+                with lock:
+                    results[pid] = record
+            finally:
+                # Always release the sweep waiter, including unexpected worker
+                # failures; otherwise it waits out the full refresh budget.
+                event.set()
 
     events: dict[str, threading.Event] = {}
     for provider_id, fetcher in items:

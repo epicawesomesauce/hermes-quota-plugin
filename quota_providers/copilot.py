@@ -47,7 +47,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _PROVIDER_ID = "copilot"
 _API_URL = "https://api.github.com/copilot_internal/user"
@@ -178,8 +178,13 @@ def _parse_snapshot(snapshot: dict) -> Optional[float]:
         remaining *= 100.0
     has_quota = snapshot.get("has_quota")
     entitlement = _as_float(snapshot.get("entitlement"))
-    quota_remaining = _as_float(snapshot.get("quota_remaining"))
-    if has_quota is False and not entitlement and not quota_remaining:
+    if has_quota is False and not entitlement:
+        # The docstring rule is "has_quota false with no entitlement and
+        # nothing consumed". The previous third clause (`and not
+        # quota_remaining`) also skipped a snapshot that reports a genuine
+        # quota_remaining count, so an account without this quota still drew a
+        # bar. Nothing consumed is the condition; a remaining count is not a
+        # reason to render a meter the account does not have.
         return None  # quota not attached to this account — not "all used"
     return max(0.0, min(100.0, 100.0 - remaining))
 
@@ -221,7 +226,7 @@ def fetch_usage(github_token: str) -> QuotaResult:
     headers["Authorization"] = f"token {github_token}"
     request = urllib.request.Request(_API_URL, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=15) as resp:
+        with urlopen_no_redirect(request, timeout=15) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):

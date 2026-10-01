@@ -399,10 +399,14 @@ class GrokRestTests(unittest.TestCase):
     )
 
     def test_grpc_fixture_reports_the_single_panel_meter(self):
-        """The usage panel renders ONE bar ("Weekly Limit … 3% used / Resets …")
-        with "Grok Build 3%" as its legend line. Reporting the kind entry as a
-        second quota showed two quotas with the same % and the same reset date
-        but different names — the panel has only one."""
+        """The usage panel renders ONE bar for this capture.
+
+        The class comment records what the live capture showed: "Weekly Limit
+        100% used (resets Aug 23 17:00Z)" with "Grok Build 3%" as its legend.
+        This docstring previously said the bar read 3%, copied from the kind-2
+        test below -- which is the legend, not the bar. The assertion below
+        expects the 100% the parser actually returns.
+        """
         from quota_providers import grok
 
         raw = bytes.fromhex(self._GRPC_FIXTURE_HEX)
@@ -426,7 +430,7 @@ class GrokRestTests(unittest.TestCase):
             "lowEffortRateLimits": None,
             "highEffortRateLimits": {"remainingQueries": 2, "totalQueries": 5},
         }
-        with mock.patch.object(grok.urllib.request, "urlopen", _urlopen_returning(payload)):
+        with mock.patch.object(grok, "urlopen_no_redirect", _urlopen_returning(payload)):
             res = grok._fetch_grok_rest("cookie=1")
         self.assertIsNone(res.unavailable_reason)
         labels = [w.label for w in res.windows]
@@ -454,7 +458,7 @@ class GrokRestTests(unittest.TestCase):
             "lowEffortRateLimits": None,
             "highEffortRateLimits": None,
         }
-        with mock.patch.object(grok.urllib.request, "urlopen", _urlopen_returning(payload)):
+        with mock.patch.object(grok, "urlopen_no_redirect", _urlopen_returning(payload)):
             res = grok._fetch_grok_rest("cookie=1")
         self.assertEqual(len(res.windows), 1)
         self.assertAlmostEqual(res.windows[0].used_percent, 100.0, places=2)
@@ -468,7 +472,7 @@ class GrokRestTests(unittest.TestCase):
         def _opener(_req, timeout=None):  # noqa: ANN001, ARG001
             _raise_closed_http_error(urllib.error.HTTPError("url", 403, "forbidden", {}, None))
 
-        with mock.patch.object(grok.urllib.request, "urlopen", _opener):
+        with mock.patch.object(grok, "urlopen_no_redirect", _opener):
             res = grok._fetch_grok_rest("cookie=1")
         self.assertEqual(res.unavailable_reason, "cloudflare-blocked")
 
@@ -638,7 +642,7 @@ class KimiFetcherTests(unittest.TestCase):
         with mock.patch.object(kimi, "_load_hermes_creds",
                                return_value=("sk-kimi-test", "https://api.kimi.com/coding")), \
              mock.patch.object(kimi, "_load_creds", return_value=(None, None)), \
-             mock.patch.object(kimi.urllib.request, "urlopen", _opener):
+             mock.patch.object(kimi, "urlopen_no_redirect", _opener):
             res = kimi.fetch_kimi_quota()
         self.assertIsNone(res.unavailable_reason)
         self.assertTrue(res.has_data())
@@ -677,7 +681,7 @@ class KimiFetcherTests(unittest.TestCase):
         with mock.patch.object(kimi, "_load_hermes_creds",
                                return_value=("sk-kimi-test", "https://api.kimi.com/coding")), \
              mock.patch.object(kimi, "_load_creds", return_value=(None, None)), \
-             mock.patch.object(kimi.urllib.request, "urlopen",
+             mock.patch.object(kimi, "urlopen_no_redirect",
                                _urlopen_returning(_KIMI_LIVE_PAYLOAD)):
             res = kimi.fetch_kimi_quota()
         by_label = {w.label: w for w in res.windows}
@@ -704,7 +708,7 @@ class KimiFetcherTests(unittest.TestCase):
 
         with mock.patch.object(kimi, "_load_hermes_creds", return_value=(None, None)), \
              mock.patch.object(kimi, "_load_creds", return_value=("legacy-key", None)), \
-             mock.patch.object(kimi.urllib.request, "urlopen", _opener):
+             mock.patch.object(kimi, "urlopen_no_redirect", _opener):
             res = kimi.fetch_kimi_quota()
         self.assertIsNone(res.unavailable_reason)
         req = captured["req"]
@@ -720,7 +724,7 @@ class KimiFetcherTests(unittest.TestCase):
         with mock.patch.object(kimi, "_load_hermes_creds",
                                return_value=("sk-kimi-test", "https://api.kimi.com/coding")), \
              mock.patch.object(kimi, "_load_creds", return_value=(None, None)), \
-             mock.patch.object(kimi.urllib.request, "urlopen", _opener):
+             mock.patch.object(kimi, "urlopen_no_redirect", _opener):
             res = kimi.fetch_kimi_quota()
         self.assertEqual(res.unavailable_reason, "auth-failed")
 
@@ -730,7 +734,7 @@ class KimiFetcherTests(unittest.TestCase):
         with mock.patch.object(kimi, "_load_hermes_creds",
                                return_value=("sk-kimi-test", "https://api.kimi.com/coding")), \
              mock.patch.object(kimi, "_load_creds", return_value=(None, None)), \
-             mock.patch.object(kimi.urllib.request, "urlopen", _urlopen_returning({})):
+             mock.patch.object(kimi, "urlopen_no_redirect", _urlopen_returning({})):
             res = kimi.fetch_kimi_quota()
         self.assertEqual(res.unavailable_reason, "no-data")
 
@@ -793,7 +797,7 @@ class AnthropicBuiltinFetcherTests(unittest.TestCase):
 
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="api-key"), \
              mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=False), \
-             mock.patch.object(builtin.urllib.request, "urlopen") as urlopen:
+             mock.patch.object(builtin, "urlopen_no_redirect") as urlopen:
             res = self._fetch()
         self.assertEqual(res.unavailable_reason, builtin._ANTHROPIC_OAUTH_REQUIRED_REASON)
         urlopen.assert_not_called()
@@ -859,8 +863,13 @@ class AnthropicScopedLimitTests(unittest.TestCase):
     def test_scoped_windows_append_to_usage_payload(self):
         import quota_providers.builtin as builtin
 
+        # _core_anthropic_is_oauth must be stubbed too: builtin rejects a
+        # non-OAuth token before parsing, so without this these tests only pass
+        # when Hermes core is unimportable, and they exercise the parser rather
+        # than the path that ships.
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin.urllib.request, "urlopen",
+             mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
+             mock.patch.object(builtin, "urlopen_no_redirect",
                                _urlopen_returning(_ANTHROPIC_LIMITS_PAYLOAD)):
             res = builtin._fetch_anthropic()
         self.assertEqual(
@@ -872,8 +881,13 @@ class AnthropicScopedLimitTests(unittest.TestCase):
     def test_weekly_all_limit_fills_core_snapshot_gap(self):
         import quota_providers.builtin as builtin
 
+        # _core_anthropic_is_oauth must be stubbed too: builtin rejects a
+        # non-OAuth token before parsing, so without this these tests only pass
+        # when Hermes core is unimportable, and they exercise the parser rather
+        # than the path that ships.
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin.urllib.request, "urlopen",
+             mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
+             mock.patch.object(builtin, "urlopen_no_redirect",
                                _urlopen_returning(_ANTHROPIC_LIMITS_PAYLOAD)):
             res = builtin._fetch_anthropic()
         self.assertEqual(
@@ -893,8 +907,13 @@ class AnthropicScopedLimitTests(unittest.TestCase):
                  "scope": {"model": {"display_name": "Fable"}}},
             ]
         }
+        # The OAuth classifier must be stubbed alongside the token: builtin
+        # drops a token the core reports as non-OAuth (builtin.py:165), so on
+        # a machine where Hermes core is importable this test would otherwise
+        # get windows == [] and pass for the wrong reason.
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin.urllib.request, "urlopen",
+             mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
+             mock.patch.object(builtin, "urlopen_no_redirect",
                                _urlopen_returning(payload)):
             res = builtin._fetch_anthropic()
         self.assertEqual([w.label for w in res.windows], ["Current week", "Fable week"])
@@ -921,7 +940,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
             raise OSError("down")
 
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin.urllib.request, "urlopen", _boom):
+             mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
+             mock.patch.object(builtin, "urlopen_no_redirect", _boom):
             res = builtin._fetch_anthropic()
         self.assertEqual(res.unavailable_reason, "fetch-error:OSError")
 
@@ -935,7 +955,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
             return _FakeResponse(json.dumps(_ANTHROPIC_LIMITS_PAYLOAD).encode())
 
         with mock.patch.object(builtin, "_core_anthropic_token", return_value="tok"), \
-             mock.patch.object(builtin.urllib.request, "urlopen", _opener):
+             mock.patch.object(builtin, "_core_anthropic_is_oauth", return_value=True), \
+             mock.patch.object(builtin, "urlopen_no_redirect", _opener):
             res = builtin._fetch_anthropic()
         self.assertIsNone(res.unavailable_reason)
         self.assertEqual(len(seen), 1)
@@ -1019,7 +1040,7 @@ class ZaiFetcherTests(unittest.TestCase):
         from quota_providers import zai
 
         with mock.patch.object(zai, "resolve_api_key", return_value="test-key"), \
-             mock.patch.object(zai.urllib.request, "urlopen", opener), \
+             mock.patch.object(zai, "urlopen_no_redirect", opener), \
              mock.patch.object(zai, "_api_root", lambda: "https://api.z.ai"):
             return zai.fetch_zai_quota()
 

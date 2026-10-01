@@ -33,7 +33,7 @@ import urllib.request
 import urllib.error
 from typing import Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 _DEFAULT_BASE_URL = "https://api.kimi.com/coding"
 _WEB_URL = "https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages"
@@ -143,10 +143,18 @@ def _parse_block(block: dict) -> QuotaWindow:
     else:
         label = "window"
     detail = block.get("detail") or {}
-    limit = _as_float(block.get("limit", detail.get("limit")))
-    used = _as_float(block.get("used", detail.get("used")))
-    remaining = _as_float(block.get("remaining", detail.get("remaining")))
-    reset = block.get("resetTime", detail.get("resetTime"))
+    # Fall back only when the top-level field is absent or null. Zero is a
+    # meaningful reported value and must not be replaced by the nested copy.
+    limit_value = block.get("limit")
+    used_value = block.get("used")
+    remaining_value = block.get("remaining")
+    reset_value = block.get("resetTime")
+    limit = _as_float(limit_value if limit_value is not None else detail.get("limit"))
+    used = _as_float(used_value if used_value is not None else detail.get("used"))
+    remaining = _as_float(
+        remaining_value if remaining_value is not None else detail.get("remaining")
+    )
+    reset = reset_value if reset_value is not None else detail.get("resetTime")
     used_pct: Optional[float] = None
     if used is not None and limit not in (None, 0):
         used_pct = round(100.0 * used / limit, 2)
@@ -170,7 +178,7 @@ def _parse_usage_entry(key: str, entry: dict) -> Optional[QuotaWindow]:
 def _fetch_with(headers: dict, url: str, method: str = "GET", body: Optional[bytes] = None) -> Optional[QuotaResult]:
     req = urllib.request.Request(url, headers=headers, method=method, data=body)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_no_redirect(req, timeout=15) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):

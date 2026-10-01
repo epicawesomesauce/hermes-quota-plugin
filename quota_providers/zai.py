@@ -58,7 +58,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable
+from .base import QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
 
 PROVIDER_ID = "zai"
 _QUOTA_PATH = "/api/monitor/usage/quota/limit"
@@ -166,7 +166,7 @@ def _used_percent(entry: dict) -> Optional[float]:
         if used is None or limit is None or limit <= 0:
             return None
         percent = used / limit * 100.0
-    if percent < 0:  # a negative server value is a schema surprise, not -3% used
+    if percent < 0 or percent > 100:  # a server value outside 0-100 is a schema surprise
         return None
     return max(0.0, min(100.0, percent))
 
@@ -286,7 +286,21 @@ def _subscription_plan(payload: Any) -> tuple[Optional[str], Optional[str]]:
             continue
         valid = item.get("valid")
         status = str(item.get("status") or "").strip().upper()
-        if valid is False or (status and status not in ("ACTIVE", "NORMAL", "OK")):
+        # A subscription item must positively assert it is live. Previously an
+        # item carrying neither `valid` nor `status` passed the filter, so a
+        # bare {"productName": "Canceled Plan"} was returned as the active plan.
+        #
+        # Both signals are required to be good, not merely one: `valid: true`
+        # alongside a canceled/expired status would otherwise surface a dead
+        # plan as the active subscription with its renewal date. An unknown
+        # status (empty) is not treated as a veto -- plenty of live responses
+        # carry no status field -- but a stated non-active one is.
+        # Conversely, an explicit `valid: false` vetoes even an ACTIVE status.
+        if valid is False:
+            continue
+        if valid is not True and status not in ("ACTIVE", "NORMAL", "OK"):
+            continue
+        if status and status not in ("ACTIVE", "NORMAL", "OK"):
             continue
         name = str(item.get("productName") or item.get("name") or "").strip()
         renew = _parse_reset(item.get("renewTime") or item.get("expireTime"))
@@ -309,7 +323,7 @@ def _get_json(url: str, api_key: str) -> Any:
         },
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=15) as resp:
+    with urlopen_no_redirect(request, timeout=15) as resp:
         raw = resp.read()
     return json.loads(raw)
 

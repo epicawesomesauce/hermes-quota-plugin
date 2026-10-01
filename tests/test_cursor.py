@@ -60,7 +60,7 @@ def _opener(routes):
 
 def _fetch(routes, token="tok"):
     with mock.patch.object(cursor, "resolve_access_token", return_value=token), \
-         mock.patch.object(cursor.urllib.request, "urlopen", _opener(routes)):
+         mock.patch.object(cursor, "urlopen_no_redirect", _opener(routes)):
         return cursor.fetch_cursor_quota()
 
 
@@ -166,7 +166,7 @@ class CursorFetcherTests(unittest.TestCase):
              mock.patch.object(cursor, "resolve_refresh_token",
                                return_value=("refresh-token", "auth-file")), \
              mock.patch.object(cursor, "_persist_refreshed_credentials") as persist, \
-             mock.patch.object(cursor.urllib.request, "urlopen", opener):
+             mock.patch.object(cursor, "urlopen_no_redirect", opener):
             res = cursor.fetch_cursor_quota()
 
         self.assertIsNone(res.unavailable_reason)
@@ -180,7 +180,17 @@ class CursorFetcherTests(unittest.TestCase):
                 ("GetPlanInfo", "Bearer fresh-token"),
             ],
         )
-        persist.assert_called_once_with("auth-file", "fresh-token", "rotated-refresh")
+        # The signature gained a keyword-only `timeout` so the keychain path
+        # can share one slice of the sweep budget (see #38). The three values
+        # this assertion pins are unchanged; assert the slice separately so a
+        # dropped bound is caught rather than folded into one loose check.
+        persist.assert_called_once_with(
+            "auth-file", "fresh-token", "rotated-refresh",
+            timeout=mock.ANY)
+        self.assertLessEqual(
+            persist.call_args.kwargs["timeout"],
+            cursor._FETCH_BUDGET_S,
+            "the persist slice must fit inside the provider budget")
 
     def test_garbage_and_empty_payloads(self):
         self.assertEqual(_fetch({"GetCurrentPeriodUsage": b"<html>"}).unavailable_reason, "bad-json")

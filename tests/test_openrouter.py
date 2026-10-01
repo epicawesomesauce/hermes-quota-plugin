@@ -234,7 +234,8 @@ class OpenRouterTests(unittest.TestCase):
                             (TimeoutError("PRIVATE_SECRET"), "timeout"), (RuntimeError("PRIVATE_SECRET"), "fetch-error")]:
             with self.subTest(reason=reason), mock.patch.object(mod, "_urlopen", side_effect=exc):
                 self.assertEqual(mod._get_json("https://openrouter.ai/api/v1/key", "FAKE_A"), (None, reason))
-        self.assertIsNone(mod._NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere.invalid"))
+        from quota_providers.base import NoRedirectHandler
+        self.assertIsNone(NoRedirectHandler().redirect_request(None, None, 302, "", {}, "https://elsewhere.invalid"))
 
     def test_http_request_and_body_limits(self):
         mod = self.module()
