@@ -474,13 +474,38 @@ function balanceText(balance) {
 	// 2^53 (9007199254740993.00 came back as ...992) and to 17 significant
 	// digits, which Intl's maximumFractionDigits cannot recover.
 	if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+		const currency = balance.currency;
+		// Take the symbol and its placement from Intl, not a hardcoded "$":
+		// DeepSeek returns CNY and OpenRouter can return any code, so a literal
+		// dollar mislabels the amount. What we cannot let Intl touch is the
+		// value -- formatting it would re-round past 2^53.
+		let prefix = "$";
+		let suffix = "";
+		try {
+			const parts = new Intl.NumberFormat(undefined, {
+				style: "currency", currency,
+			}).formatToParts(12345.6);
+			const literal = parts
+				.filter((p) => p.type === "currency")
+				.map((p) => p.value)
+				.join("");
+			const at = parts.findIndex((p) => p.type === "currency");
+			const after = parts.slice(at + 1).some((p) => p.type === "literal");
+			if (literal) {
+				prefix = after ? "" : literal;
+				suffix = after ? literal : "";
+			}
+		} catch {
+			// Unknown/invalid currency code: keep the dollar fallback rather
+			// than rendering nothing.
+		}
 		const [whole, frac = ""] = raw.replace("-", "").split(".");
 		const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 		const sign = raw.startsWith("-") ? "-" : "";
 		// At least two fraction digits, as the Intl path always produced.
 		const digits = Math.max(2, balanceFractionDigits(raw));
 		const shown = (frac + "0".repeat(digits)).slice(0, digits);
-		return `$${sign}${grouped}.${shown} ${balance.currency}`;
+		return `${prefix}${sign}${grouped}.${shown}${suffix ? ` ${suffix}` : ""} ${currency}`;
 	}
 	const n = Number(raw);
 	const format = (value) => new Intl.NumberFormat(undefined, {
