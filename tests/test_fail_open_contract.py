@@ -203,6 +203,58 @@ class CodexPostRequestParseTests(unittest.TestCase):
         self.assertEqual([(w.label, w.used_percent) for w in result.windows], [("Session", 42.0)])
 
 
+class MalformedReturnTests(unittest.TestCase):
+    """_fetch_one is documented as never raising; hold it to that.
+
+    The call site runs it on a bare thread with no guard, so anything escaping
+    here is swallowed by the thread, that provider's event is never set, and
+    the sweep waits out the whole budget. A fetcher returning a non-QuotaResult
+    is how that happens.
+    """
+
+    def _qc(self):
+        import os
+        import sys
+        import tempfile
+        import types
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        stub = types.ModuleType("hermes_constants")
+        stub.get_hermes_home = lambda: Path(
+            os.environ.get("HERMES_HOME") or tempfile.gettempdir())
+        sys.modules.setdefault("hermes_constants", stub)
+        pkg = types.ModuleType("quota_plugin_under_test")
+        pkg.__path__ = [str(root)]
+        sys.modules["quota_plugin_under_test"] = pkg
+        return importlib.import_module("quota_plugin_under_test.quota_cache")
+
+    def test_a_dict_return_does_not_escape(self):
+        qc = self._qc()
+        record = qc._fetch_one("probe", lambda: {"unexpected": "shape"})
+        self.assertEqual(record["unavailable_reason"], "fetch-error")
+
+    def test_a_bare_none_is_still_no_data(self):
+        qc = self._qc()
+        record = qc._fetch_one("probe", lambda: None)
+        self.assertEqual(record["unavailable_reason"], "no-data")
+
+    def test_a_real_result_still_converts(self):
+        qc = self._qc()
+        # From the SAME package instance qc imported, or isinstance fails on a
+        # duplicate module object.
+        base = importlib.import_module(
+            "quota_plugin_under_test.quota_providers.base")
+        QuotaResult, QuotaWindow = base.QuotaResult, base.QuotaWindow
+        record = qc._fetch_one("probe", lambda: QuotaResult(
+            label="probe", windows=[QuotaWindow(label="w", used_percent=10.0)],
+            plan=None, unavailable_reason=None))
+        self.assertIsNone(record["unavailable_reason"])
+        self.assertEqual(record["windows"][0]["used_percent"], 10.0)
+
+
 class FailOpenContractIsDocumentedTests(unittest.TestCase):
     """Guard against the contract being quietly dropped from the guide."""
 

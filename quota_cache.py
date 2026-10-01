@@ -132,6 +132,17 @@ def _fetch_one(provider_id: str, fetcher: Any) -> dict[str, Any]:
         return _unavailable_record(provider_id, "fetch-error")
     if res is None:
         return _unavailable_record(provider_id, "no-data")
+    # A fetcher returning anything other than a QuotaResult would make
+    # _result_to_record raise AttributeError here -- outside the try above --
+    # and this function is documented as never raising. The caller runs it on a
+    # bare thread with no guard, so the exception would be swallowed and that
+    # provider's event never set, stalling the sweep for the full budget.
+    # No shipped fetcher does this (all 15 return a QuotaResult); this keeps
+    # the promise true for one added later.
+    if not isinstance(res, QuotaResult):
+        logger.debug("quota_cache ▸ fetcher %s returned %r, not a QuotaResult",
+                     provider_id, type(res).__name__)
+        return _unavailable_record(provider_id, "fetch-error")
     return _result_to_record(res)
 
 
