@@ -336,7 +336,8 @@ def _persist_auth_file(access_token: str, refresh_token: Optional[str]) -> None:
                 pass
 
 
-def _store_keychain_token(service: str, token: str) -> None:
+def _store_keychain_token(service: str, token: str,
+                         timeout: Optional[float] = None) -> None:
     if sys.platform != "darwin":
         return
     try:
@@ -348,25 +349,37 @@ def _store_keychain_token(service: str, token: str) -> None:
             check=False,
             capture_output=True,
             text=True,
-            timeout=_KEYCHAIN_TIMEOUT_S,
+            timeout=_KEYCHAIN_TIMEOUT_S if timeout is None else timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         return
 
 
 def _persist_refreshed_credentials(
-    storage_kind: Optional[str], access_token: str, refresh_token: Optional[str]
+    storage_kind: Optional[str], access_token: str, refresh_token: Optional[str],
+    timeout: Optional[float] = None,
 ) -> None:
     if storage_kind == "auth-file":
         _persist_auth_file(access_token, refresh_token)
     elif storage_kind == "keychain":
-        _store_keychain_token(_KEYCHAIN_SERVICE, access_token)
+        # Two serial `security` subprocesses, so a stalled first write would
+        # otherwise add a second full timeout past the sweep budget. The
+        # refresh token is best-effort: an access token already stored is worth
+        # more than a half-finished pair.
+        _store_keychain_token(_KEYCHAIN_SERVICE, access_token, timeout=timeout)
         if refresh_token:
-            _store_keychain_token(_KEYCHAIN_REFRESH_SERVICE, refresh_token)
+            # Whatever is left after the first write; `_store_keychain_token`
+            # treats a 0 timeout as "try and fail fast". Dropping the refresh
+            # token would leave the account unable to refresh again, so it is
+            # never skipped outright -- the caller sizes the slice instead.
+            remaining = (None if timeout is None
+                         else max(0.0, timeout - _KEYCHAIN_TIMEOUT_S))
+            _store_keychain_token(_KEYCHAIN_REFRESH_SERVICE, refresh_token,
+                                  timeout=remaining)
 
 
-def _plan_name(token: str) -> Optional[str]:
-    data, _ = _post("GetPlanInfo", token)
+def _plan_name(token: str, timeout: float = _HTTP_TIMEOUT_S) -> Optional[str]:
+    data, _ = _post("GetPlanInfo", token, timeout=timeout)
     info = data.get("planInfo") if isinstance(data, dict) else None
     name = info.get("planName") if isinstance(info, dict) else None
     return name.strip() if isinstance(name, str) and name.strip() else None
@@ -392,6 +405,7 @@ def fetch_cursor_quota() -> QuotaResult:
                         storage_kind,
                         fresh_token,
                         rotated_refresh or refresh_token,
+                        timeout=deadline.slice(2 * _KEYCHAIN_TIMEOUT_S),
                     )
                     token = fresh_token
                     data, reason = _post("GetCurrentPeriodUsage", token,
@@ -405,7 +419,8 @@ def fetch_cursor_quota() -> QuotaResult:
         windows, details = parse_usage(data)
         if not windows and not details:
             return build_unavailable(_PROVIDER_ID, "no-data")
-        plan = None if deadline.expired() else _plan_name(token)
+        plan = (None if deadline.expired()
+                else _plan_name(token, deadline.slice(_HTTP_TIMEOUT_S)))
         return QuotaResult(
             label=_PROVIDER_ID,
             windows=windows,

@@ -260,6 +260,61 @@ class HappyPathsUnchangedTests(unittest.TestCase):
         self.assertEqual(result.plan, "Pro")
         self.assertEqual([w.used_percent for w in result.windows], [50.0])
 
+    def test_cursor_plan_lookup_gets_the_remaining_budget(self):
+        """_plan_name is a real request; it must not run on a bare default."""
+        mod = importlib.import_module("quota_providers.cursor")
+        seen = {}
+
+        def capture_plan(token, timeout=None):
+            seen["timeout"] = timeout
+            return "Pro"
+
+        with mock.patch.object(mod, "resolve_access_token", return_value="tok"), \
+             mock.patch.object(mod, "_post", return_value=({"spendLimitUsage":
+                     {"overallUsed": 1, "overallLimit": 2}}, None)), \
+             mock.patch.object(mod, "_plan_name", capture_plan):
+            result = mod.fetch_cursor_quota()
+        self.assertEqual(result.plan, "Pro")
+        self.assertIn("timeout", seen,
+                      "_plan_name called without a deadline slice")
+        self.assertLessEqual(seen["timeout"], mod._FETCH_BUDGET_S)
+
+    def test_cursor_keychain_writes_share_one_slice(self):
+        """Two serial `security` calls must not each take the full timeout."""
+        mod = importlib.import_module("quota_providers.cursor")
+        calls = []
+
+        def capture(service, token, timeout=None):
+            calls.append((service, timeout))
+
+        with mock.patch.object(mod.sys, "platform", "darwin"), \
+             mock.patch.object(mod, "_store_keychain_token", capture):
+            mod._persist_refreshed_credentials("keychain", "a1", "r1",
+                                               timeout=mod._KEYCHAIN_TIMEOUT_S)
+        self.assertEqual([c[0] for c in calls],
+                         [mod._KEYCHAIN_SERVICE, mod._KEYCHAIN_REFRESH_SERVICE])
+        # The second write must not start after the budget the first consumed.
+        self.assertIsNotNone(calls[1][1])
+        self.assertLessEqual(calls[1][1], mod._KEYCHAIN_TIMEOUT_S)
+
+    def test_cursor_keychain_refresh_token_is_never_dropped(self):
+        """Losing the refresh token leaves the account unable to refresh.
+
+        So even when the budget is spent the second write is attempted with
+        whatever remains -- and `_store_keychain_token` treats 0 as fail-fast.
+        """
+        mod = importlib.import_module("quota_providers.cursor")
+        for budget in (mod._KEYCHAIN_TIMEOUT_S * 2, mod._KEYCHAIN_TIMEOUT_S, 0.0):
+            with self.subTest(budget=budget):
+                calls = []
+                with mock.patch.object(mod.sys, "platform", "darwin"), \
+                     mock.patch.object(mod, "_store_keychain_token",
+                                       lambda s, t, timeout=None: calls.append(s)):
+                    mod._persist_refreshed_credentials("keychain", "a1", "r1",
+                                                       timeout=budget)
+                self.assertEqual(calls, [mod._KEYCHAIN_SERVICE,
+                                         mod._KEYCHAIN_REFRESH_SERVICE])
+
     def test_opencode_go_live_shape_still_parses(self):
         mod = importlib.import_module("quota_providers.opencode_go")
         payload = {"usage": {
