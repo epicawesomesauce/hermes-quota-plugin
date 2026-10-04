@@ -84,6 +84,23 @@ def fetch_experientiallabs_quota() -> QuotaResult:
         return build_unavailable(PROVIDER_ID, "fetch-error")
 
 
+def _safe_int(value) -> int | None:
+    """Parse a token field returning None on any non-coercible value.
+
+    ``int(row.get("input_tokens") or 0)`` raises ``TypeError`` on non-numeric
+    values.  We tolerate a missing/None field (counts as 0) and reject anything
+    that would raise or produce a fractional value; returning None means "skip
+    this row's token detail rather than lose the entire balance".
+    """
+    if value is None or value is True or value is False:
+        return 0
+    try:
+        v = int(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+    return v
+
+
 def _fetch(secret: str) -> QuotaResult:
     """Inner fetch body with its own exception guard via the caller."""
     from decimal import Decimal as _Decimal
@@ -96,7 +113,7 @@ def _fetch(secret: str) -> QuotaResult:
     # -- 1. Credits (wallet) --------------------------------------------------
     if not deadline.expired():
         credits_url = _BASE_URL + _CREDITS_PATH
-        payload, error = _get_json(credits_url, secret)
+        payload, error = _get_json(credits_url, secret, deadline.slice(_HTTP_TIMEOUT_S))
         if error:
             details.append(f"Credits: unavailable ({error})")
         elif not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
@@ -121,7 +138,7 @@ def _fetch(secret: str) -> QuotaResult:
     # -- 2. Recent usage ------------------------------------------------------
     if not deadline.expired():
         usage_url = f"{_BASE_URL}{_USAGE_PATH}?limit={_USAGE_ROWS}"
-        payload, error = _get_json(usage_url, secret)
+        payload, error = _get_json(usage_url, secret, deadline.slice(_HTTP_TIMEOUT_S))
         if error:
             details.append(f"Usage: unavailable ({error})")
         elif not isinstance(payload, dict) or "data" not in payload:
@@ -135,15 +152,24 @@ def _fetch(secret: str) -> QuotaResult:
                     if not isinstance(row, dict):
                         continue
                     cost = _amount(row.get("real_cost_usd"))
-                    model = row.get("model", "?")
+                    model = str(row.get("model") or "?")
                     created = str(row.get("created_at", ""))[:10] if row.get("created_at") else ""
-                    tokens = int(row.get("input_tokens") or 0) + int(row.get("output_tokens") or 0) + int(row.get("cached_input_tokens") or 0) + int(row.get("reasoning_tokens") or 0)
+                    it = _safe_int(row.get("input_tokens"))
+                    ot = _safe_int(row.get("output_tokens"))
+                    ci = _safe_int(row.get("cached_input_tokens"))
+                    rt = _safe_int(row.get("reasoning_tokens"))
+                    # If any token field is non-coercible skip the token
+                    # segment for this row rather than losing the balance.
+                    token_str = ""
+                    if it is not None and ot is not None and ci is not None and rt is not None:
+                        token_sum = it + ot + ci + rt
+                        token_str = f" · {token_sum}t"
                     # attribution_label deliberately omitted (may carry PII)
                     # id deliberately omitted (not user-facing)
                     if cost is not None:
                         recent_total += _Decimal(cost)
-                    cost_str = cost or "?"
-                    detail_lines.append(f"{model} · ${cost_str} · {tokens}t · {created}")
+                    cost_str = cost if cost is not None else "?"
+                    detail_lines.append(f"{model} · ${cost_str}{token_str} · {created}")
                 if detail_lines:
                     details.append(f"Recent usage (last {len(detail_lines)}):")
                     details.extend(detail_lines)

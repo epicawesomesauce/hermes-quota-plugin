@@ -74,7 +74,7 @@ class ExperientialLabsTests(unittest.TestCase):
             mod, "_get_json"
         ) as get:
             # Make _get_json return credits payload the first call, usage the second
-            def side_effect(url, secret):
+            def side_effect(url, secret, timeout=None):
                 if "/credits" in url:
                     return self.credits_payload(), None
                 if "/usage" in url:
@@ -135,7 +135,7 @@ class ExperientialLabsTests(unittest.TestCase):
             mod, "_get_json"
         ) as get:
 
-            def side_effect(url, secret):
+            def side_effect(url, secret, timeout=None):
                 if "/credits" in url:
                     return None, "auth-failed"
                 if "/usage" in url:
@@ -227,6 +227,78 @@ class ExperientialLabsTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_primary", "EXPLABS_API_KEY": "xpl_secondary"}):
             self.assertEqual(mod.resolve_api_key(), "xpl_primary")
 
+    def test_malformed_token_does_not_kill_balance(self):
+        """A non-numeric token field costs that detail line, not the wallet."""
+        mod = self.module()
+        usage_with_bad_tokens = {
+            "data": [
+                {
+                    "model": "gpt-6-astra",
+                    "real_cost_usd": "0.0123",
+                    "input_tokens": "NaN",
+                    "output_tokens": 120,
+                    "cached_input_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "created_at": "2026-09-30T10:00:00Z",
+                },
+                {
+                    "model": "claude-fable-5.1",
+                    "real_cost_usd": "0.0450",
+                    "input_tokens": 1000,
+                    "output_tokens": 300,
+                    "cached_input_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "created_at": "2026-09-30T09:45:00Z",
+                },
+            ]
+        }
+        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_a" * 10}), mock.patch.object(
+            mod, "_get_json"
+        ) as get:
+
+            def side_effect(url, secret, timeout=None):
+                if "/credits" in url:
+                    return {"data": {"total_credits": "10.00", "total_usage": "3.00"}}, None
+                if "/usage" in url:
+                    return usage_with_bad_tokens, None
+                return None, "fetch-error"
+
+            get.side_effect = side_effect
+            result = mod.fetch_experientiallabs_quota()
+
+        # Balance is preserved (7 USD remaining) — no fetch-error
+        self.assertIsNone(result.unavailable_reason)
+        self.assertTrue(result.has_data())
+        # detail for the row with bad tokens omits the token count
+        text = "\n".join(result.details)
+        self.assertIn("Remaining USD 7.00", text)
+        self.assertIn("gpt-6-astra", text)
+        self.assertIn("claude-fable-5.1", text)
+        self.assertNotIn("NaN", text)
+
+    def test_timeout_propagated_to_get_json(self):
+        """The deadline-sliced timeout is passed as the third arg to get_json."""
+        mod = self.module()
+        captured_timeouts = []
+
+        def side_effect(url, secret, timeout=None):
+            captured_timeouts.append(timeout)
+            if "/credits" in url:
+                return {"data": {"total_credits": "50.00", "total_usage": "10.00"}}, None
+            if "/usage" in url:
+                return {"data": []}, None
+            return None, "fetch-error"
+
+        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_b" * 10}), mock.patch.object(
+            mod, "_get_json", side_effect=side_effect
+        ):
+            mod.fetch_experientiallabs_quota()
+
+        self.assertGreaterEqual(len(captured_timeouts), 1)
+        for t in captured_timeouts:
+            self.assertIsNotNone(t)
+            self.assertLessEqual(t, 7.0)
+
     def test_no_secrets_or_ids_in_output(self):
         """attribution_label, request IDs, and raw env values must never appear."""
         mod = self.module()
@@ -249,7 +321,7 @@ class ExperientialLabsTests(unittest.TestCase):
             mod, "_get_json"
         ) as get:
 
-            def side_effect(url, secret):
+            def side_effect(url, secret, timeout=None):
                 if "/credits" in url:
                     return self.credits_payload(), None
                 if "/usage" in url:
