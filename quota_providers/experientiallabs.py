@@ -5,7 +5,7 @@ remaining = total_credits - total_usage.
 GET /api/v1/usage returns settled per-request rows for recent activity.
 
 This provider is not yet in Hermes core so credentials are resolved from the
-environment (``EXPERIENTIALLABS_API_KEY``, fallback ``EXPLABS_API_KEY``).
+environment (``EXPLABS_API_KEY``).
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ PROVIDER_ID = "experientiallabs"
 _BASE_URL = "https://api.experientiallabs.ai/api/v1"
 _CREDITS_PATH = "/credits"
 _USAGE_PATH = "/usage"
-# Env vars the docs reference; EXPERIENTIALLABS_API_KEY is canonical.
-_ENV_KEYS = ("EXPERIENTIALLABS_API_KEY", "EXPLABS_API_KEY")
+# Env vars the docs reference; EXPLABS_API_KEY is canonical.
+_ENV_KEYS = ("EXPLABS_API_KEY",)
 _FETCH_BUDGET_S = 10.0
 _HTTP_TIMEOUT_S = 7.0
 _MAX_BODY = 1024 * 1024

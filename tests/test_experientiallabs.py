@@ -102,7 +102,7 @@ class ExperientialLabsTests(unittest.TestCase):
         self.assertIn("deepseek", PROVIDER_FETCHERS)
 
     def test_account_balance_from_credits(self):
-        result, get = self._run_env_fetch(self.module(), "EXPERIENTIALLABS_API_KEY", "xpl_" + "a" * 40)
+        result, get = self._run_env_fetch(self.module(), "EXPLABS_API_KEY", "xpl_" + "a" * 40)
         self.assertIsNone(result.unavailable_reason)
         self.assertEqual(result.label, "experientiallabs")
         self.assertEqual(result.windows, [])
@@ -117,7 +117,7 @@ class ExperientialLabsTests(unittest.TestCase):
         self.assertIn("25.50", result.details[0])  # total_usage in detail
 
     def test_recent_usage_in_details(self):
-        result, get = self._run_env_fetch(self.module(), "EXPERIENTIALLABS_API_KEY", "xpl_" + "a" * 40)
+        result, get = self._run_env_fetch(self.module(), "EXPLABS_API_KEY", "xpl_" + "a" * 40)
         # Usage list items should appear
         usage_lines = [d for d in result.details if "gpt-6-astra" in d or "claude-fable-5.1" in d]
         self.assertEqual(len(usage_lines), 2)
@@ -131,7 +131,7 @@ class ExperientialLabsTests(unittest.TestCase):
 
     def test_credits_unavailable_does_not_block_recent_usage(self):
         mod = self.module()
-        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_" + "b" * 40}), mock.patch.object(
+        with mock.patch.dict("os.environ", {"EXPLABS_API_KEY": "xpl_" + "b" * 40}), mock.patch.object(
             mod, "_get_json"
         ) as get:
 
@@ -162,7 +162,7 @@ class ExperientialLabsTests(unittest.TestCase):
             get.assert_not_called()
 
     def test_fallback_env_var_works(self):
-        """EXPLABS_API_KEY should work as fallback when EXPERIENTIALLABS_API_KEY is unset."""
+        """EXPLABS_API_KEY should work as the primary env var."""
         result, get = self._run_env_fetch(self.module(), "EXPLABS_API_KEY", "xpl_" + "c" * 40)
         self.assertIsNone(result.unavailable_reason)
         self.assertTrue(result.has_data())
@@ -171,7 +171,7 @@ class ExperientialLabsTests(unittest.TestCase):
         mod = self.module()
         for payload in (None, {}, {"data": None}, {"data": {"total_credits": None, "total_usage": None}}):
             with self.subTest(payload=payload):
-                with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_d"}), mock.patch.object(
+                with mock.patch.dict("os.environ", {"EXPLABS_API_KEY": "xpl_d"}), mock.patch.object(
                     mod, "_get_json", return_value=(payload, None)
                 ):
                     result = mod.fetch_experientiallabs_quota()
@@ -215,17 +215,9 @@ class ExperientialLabsTests(unittest.TestCase):
             key = mod.resolve_api_key()
             self.assertIsNone(key)
 
-        # When EXPERIENTIALLABS_API_KEY is set, it returns that
-        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_secret"}):
+        # When EXPLABS_API_KEY is set, it returns that
+        with mock.patch.dict("os.environ", {"EXPLABS_API_KEY": "xpl_secret"}):
             self.assertEqual(mod.resolve_api_key(), "xpl_secret")
-
-        # Fallback: EXPLABS_API_KEY works
-        with mock.patch.dict("os.environ", {"EXPLABS_API_KEY": "xpl_fallback"}):
-            self.assertEqual(mod.resolve_api_key(), "xpl_fallback")
-
-        # Canonical takes priority over fallback
-        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_primary", "EXPLABS_API_KEY": "xpl_secondary"}):
-            self.assertEqual(mod.resolve_api_key(), "xpl_primary")
 
     def test_malformed_token_does_not_kill_balance(self):
         """A non-numeric token field costs that detail line, not the wallet."""
@@ -252,7 +244,7 @@ class ExperientialLabsTests(unittest.TestCase):
                 },
             ]
         }
-        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_a" * 10}), mock.patch.object(
+        with mock.patch.dict("os.environ", {"EXPLABS_API_KEY": "xpl_a" * 10}), mock.patch.object(
             mod, "_get_json"
         ) as get:
 
@@ -289,7 +281,7 @@ class ExperientialLabsTests(unittest.TestCase):
                 return {"data": []}, None
             return None, "fetch-error"
 
-        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_b" * 10}), mock.patch.object(
+        with mock.patch.dict("os.environ", {"EXPLABS_API_KEY": "xpl_b" * 10}), mock.patch.object(
             mod, "_get_json", side_effect=side_effect
         ):
             mod.fetch_experientiallabs_quota()
@@ -317,7 +309,7 @@ class ExperientialLabsTests(unittest.TestCase):
                 }
             ]
         }
-        with mock.patch.dict("os.environ", {"EXPERIENTIALLABS_API_KEY": "xpl_" + "e" * 40}), mock.patch.object(
+        with mock.patch.dict("os.environ", {"EXPLABS_API_KEY": "xpl_" + "e" * 40}), mock.patch.object(
             mod, "_get_json"
         ) as get:
 

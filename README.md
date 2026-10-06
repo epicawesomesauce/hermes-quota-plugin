@@ -174,7 +174,7 @@ Everything lives in the pane's **Quota Settings** view and persists locally:
 | `kimi` | Hermes `kimi-coding` auth (dotenv/pool) or `~/kimi_session.json` | Session (5h), Monthly, and rate windows from `api.kimi.com/coding/v1/usages` |
 | `openrouter` | Hermes native API key + saved credential pool | Per-key caps/usage and one explicitly scoped account wallet; see below |
 | `deepseek` | Native DeepSeek API key | Account balances in USD/CNY and API-call availability, no fabricated percentage |
-| `experientiallabs` | API key (`EXPERIENTIALLABS_API_KEY` or `EXPLABS_API_KEY` env var) | Account wallet in USD and recent-usage activity; see below |
+| `experientiallabs` | API key (`EXPLABS_API_KEY` env var) | Account wallet in USD and recent-usage activity; see below |
 | `opencode-go` | API key | See the OpenCode note below |
 | `zai` | Z.ai API key | GLM Coding Plan Session, Weekly and web-tools windows |
 | `commandcode` | Command Code CLI `~/.commandcode/auth.json`, then Hermes `commandcode` API-key auth | 5h, Weekly, and a known-plan Cycle window |
@@ -228,7 +228,7 @@ and credentials are never written into the display cache.
 Reads the [`GET /api/v1/credits`](https://platform.experientiallabs.ai/docs/cost-api#balance)
 and [`GET /api/v1/usage`](https://platform.experientiallabs.ai/docs/cost-api#export)
 endpoints at `https://api.experientiallabs.ai/api/v1`. Credentials come from the
-`EXPERIENTIALLABS_API_KEY` environment variable (or `EXPLABS_API_KEY` as a fallback).
+`EXPLABS_API_KEY` environment variable.
 The provider is not yet registered in the Hermes core credential registry, so a
 dotenv entry or shell variable is required.
 
